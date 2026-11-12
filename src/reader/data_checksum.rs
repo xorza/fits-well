@@ -40,8 +40,7 @@ impl DataChecksum {
     /// read only when a keyword needs its sum.
     ///
     /// # Panics
-    ///
-    /// If this is not [`DataChecksum::of`] `hdu`.
+    /// In a debug build, if this is not [`DataChecksum::of`] `hdu`.
     pub(crate) fn finish<S: Source>(
         self,
         hdu: &Hdu,

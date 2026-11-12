@@ -68,11 +68,10 @@ fn pixel_to_world_matches_astropy() {
 /// A world coordinate holds α and δ in degrees, each rounded once, so a pixel → world
 /// → pixel round trip misses by about that rounding: an ulp of α, scaled by cos δ on the
 /// sky, and an ulp of δ, with as much again for the rotation and the projection, which
-/// each round too. The sweep covers each
-/// zenithal projection at the IRAC header's reference point, at 60°, and next to the
-/// celestial pole, at 1.2″ and at 3.6 mas a pixel, out to 20° or 1e5 pixels: there the
-/// latitude once came from `asin` of a value next to 1, which lost every offset under a
-/// pixel at 3.6 mas.
+/// each round too. The sweep covers each zenithal projection at the IRAC header's reference
+/// point, at 60°, and next to the celestial pole, at 1.2″ and at 3.6 mas a pixel, out to 20°
+/// or 1e5 pixels: next to the pole, a latitude taken by `asin` of a value next to 1 would
+/// lose every offset under a pixel at 3.6 mas, so `NativeRotation` takes it by `atan2`.
 #[test]
 fn world_to_pixel_inverts_pixel_to_world() {
     let ulp = |value: f64| value.abs().next_up() - value.abs();

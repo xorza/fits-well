@@ -258,9 +258,7 @@ pub(crate) fn compress_table<C: TableCells>(
         .checked_mul(metas.len())
         .ok_or(FitsError::DataUnitOverflow)?;
 
-    // Compress each (chunk, column) tile independently — the compute-bound step,
-    // parallel under the `parallel` feature, indexed `chunk * ncols + ci` so the
-    // results land in the same flat order the descriptor rows expect.
+    // Indexed `chunk * ncols + ci`, the flat order the descriptor rows expect.
     let comps = map_tiles(tile_count, TableEncodeScratch::default, |scratch, tile| {
         encode.encode_tile(scratch, tile)
     })?;
@@ -601,7 +599,6 @@ impl TiledTable {
         let ncols = header.require_usize(keywords::TFIELDS)?;
         validate_table_field_count(ncols)?;
 
-        // Resolve each column's original form and codec.
         let mut metas = Vec::with_capacity(ncols);
         let mut zforms = Vec::with_capacity(ncols);
         let mut offset = 0;
@@ -631,7 +628,6 @@ impl TiledTable {
             });
         }
 
-        // Restore the original header: drop the Z* keywords, reinstate NAXIS/PCOUNT.
         let mut restored = header.clone();
         restored.set_internal(keywords::NAXIS.indexed(1)?, value::fits_i64(naxis1)?);
         restored.set_internal(keywords::NAXIS.indexed(2)?, value::fits_i64(nrows)?);

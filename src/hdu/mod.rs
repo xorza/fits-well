@@ -23,10 +23,9 @@ use crate::image_model::Metadata;
 
 /// One Header/Data Unit located by a scan of the headers.
 ///
-/// The data unit itself is read lazily via [`FitsReader::read_data_unit`]; this
-/// record carries the parsed header, the inferred [`HduKind`], the data unit's byte
-/// range within the source, and the image geometry or table schema the header
-/// declares, resolved once when the file is opened.
+/// The data unit is read lazily via [`FitsReader::read_data_unit`]; this record carries the
+/// parsed header, the [`HduKind`], the data unit's byte range, and the image geometry or
+/// table schema the header declares, resolved once when the file is opened.
 ///
 /// [`FitsReader::read_data_unit`]: crate::FitsReader::read_data_unit
 #[derive(Debug)]
@@ -44,10 +43,9 @@ pub struct Hdu {
     pub(crate) data_offset: u64,
     /// The 2880-byte blocks the header fills.
     header_blocks: usize,
-    /// Unpadded data length (`Nbits / 8`) — where the meaningful data ends within
-    /// the padded unit. The on-disk length rounds it up to the block grid.
+    /// Unpadded data length (`Nbits / 8`): where the meaningful data ends within the
+    /// padded unit.
     pub data_bytes: u64,
-    /// `data_bytes` rounded up to the block grid.
     padded_data_bytes: u64,
     /// `None` when the HDU is not an image, or its header does not resolve to one;
     /// [`Hdu::image_geometry`] then reports why.
@@ -114,7 +112,6 @@ impl Hdu {
         })
     }
 
-    /// The number of 2880-byte blocks the header fills.
     pub(crate) const fn header_blocks(&self) -> usize {
         self.header_blocks
     }

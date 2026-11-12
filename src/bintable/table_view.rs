@@ -51,8 +51,7 @@ impl<'a> TableView<'a> {
     }
 
     /// A handle to the variable-length column named `name`, or `None` when the table
-    /// has no such column — the optional per-tile source and mask columns of a
-    /// compressed image are all addressed this way.
+    /// has no such column, as with a compressed image's optional per-tile columns.
     #[cfg(feature = "compression")]
     pub(crate) fn optional_vla_column(&self, name: &str) -> Result<Option<VlaColumn<'a>>> {
         match self.column_index(name)? {

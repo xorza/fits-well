@@ -86,8 +86,8 @@ impl Schema {
             });
         }
 
-        // `row_count · row_len` from untrusted axes: check once (guards a 32-bit-usize
-        // overflow that `HduKind::data_bytes`' u64 math wouldn't catch) and reuse.
+        // Untrusted axes: a 32-bit-usize overflow that `HduKind::data_bytes`' u64 math
+        // would not catch.
         let main_table = row_count
             .checked_mul(row_len)
             .ok_or(FitsError::DataUnitOverflow)?;

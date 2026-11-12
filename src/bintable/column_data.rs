@@ -75,7 +75,7 @@ impl TryFrom<ColumnData> for BitVec<u8, Msb0> {
 }
 
 impl ColumnData {
-    /// Total element count across all rows (the backing `Vec`'s length).
+    /// Total element count across all rows.
     pub fn len(&self) -> usize {
         self.view().len()
     }

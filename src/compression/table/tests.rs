@@ -125,9 +125,8 @@ fn table_compression_round_trips() {
 }
 
 /// `comp_table_nocompress.fits` holds `ZCTYPn = 'NOCOMPRESS'` columns (§10.4, Table 36),
-/// fixed and variable-length, written by fits-well before its writer refused them
-/// (cfitsio cannot read them), its descriptor blocks since moved to the cfitsio order;
-/// the reader still restores such a table exactly.
+/// fixed and variable-length: the reader restores such a table exactly, though the
+/// writer refuses them (cfitsio cannot read them).
 #[test]
 fn reads_nocompress_table_columns() {
     let rows = 12;
@@ -234,11 +233,9 @@ fn table_codecs_are_the_ones_cfitsio_reads() {
 
 #[test]
 fn decodes_a_cfitsio_compressed_table() {
-    // Ground truth: `comp_table_cfitsio.fits` was produced by cfitsio's `fpack
-    // -tableonly` from `comp_table_ref.fits` (500 rows, 6 fixed-width columns).
-    // fpack chose a real mix of per-column codecs — GZIP_2 (short/float/double),
-    // RICE_1 (the int32 columns), GZIP_1 (byte) — so this exercises every decode
-    // path against an independent implementation. Our uncompressed output must be
+    // `comp_table_cfitsio.fits` is cfitsio's `fpack -tableonly` of `comp_table_ref.fits`
+    // (500 rows, 6 fixed-width columns), with fpack's own mix of per-column codecs: GZIP_2
+    // (short/float/double), RICE_1 (int32), GZIP_1 (byte). Our output must be
     // byte-identical to the original table.
     let restored = Fixture::CompTableCfitsio.stream().read_table(1).unwrap();
     let original = Fixture::CompTableRef.stream().read_table(1).unwrap();
@@ -762,7 +759,7 @@ fn uncompress_table_refuses_a_negative_size_or_zero_tile_height() {
 
 /// §10.3.1: the copied `TDIMn` describes the uncompressed column, not the compressed
 /// container cell. A constant `100J` column shaped `(10,10)` compresses to far fewer than
-/// 100 elements and once failed the `TDIMn` check on read.
+/// 100 elements, so the `TDIMn` check on read must not apply to it.
 #[test]
 fn shaped_column_reads_back_from_a_compressed_table() {
     for compression in TABLE_CODECS {

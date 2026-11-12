@@ -18,14 +18,8 @@ use crate::image_model::physical_sample::PhysicalSample;
 use crate::image_model::unsigned_data::UnsignedData;
 use crate::ragged::Ragged;
 
-/// A handle to one column of a [`Table`], from [`Table::column`]. Decode through it without
-/// re-passing the column descriptor, into buffers the caller keeps across reads:
-/// [`raw_into`](Self::raw_into) for the typed values, [`physical_into`](Self::physical_into)
-/// for the scaled plane, [`unsigned_into`](Self::unsigned_into)/[`complex`](Self::complex)/
-/// [`bits`](Self::bits) for the special kinds, and [`vla_into`](Self::vla_into) (+
-/// [`vla_physical_into`](Self::vla_physical_into)/[`vla_unsigned`](Self::vla_unsigned)/
-/// [`vla_complex`](Self::vla_complex)/[`vla_bits`](Self::vla_bits)) for variable-length
-/// `P`/`Q` columns. Borrows the table, so it cannot outlive it.
+/// A handle to one column of a [`Table`], from [`Table::column`], decoding into buffers
+/// the caller keeps across reads. Borrows the table, so it cannot outlive it.
 ///
 /// [`Table`]: crate::table::Table
 /// [`Table::column`]: crate::table::Table::column
@@ -40,15 +34,13 @@ impl<'a> ColumnReader<'a> {
         ColumnReader { table, index }
     }
 
-    /// The column's [`Column`] descriptor — name, `TFORMn`, `TSCALn`/`TZEROn`/`TNULLn`,
-    /// `TDIMn`, `TDISPn`.
+    /// The column's [`Column`] descriptor.
     pub const fn descriptor(&self) -> &'a Column {
         &self.table.columns[self.index]
     }
 
-    /// The column descriptor, rejecting a variable-length (`P`/`Q`) column — the
-    /// shared precondition of every fixed-width decode. Those columns carry heap
-    /// descriptors rather than values, so they go through [`ColumnReader::vla_into`].
+    /// The column descriptor, rejecting a variable-length (`P`/`Q`) column: those carry
+    /// heap descriptors rather than values, so they go through [`ColumnReader::vla_into`].
     const fn fixed_descriptor(&self) -> Result<&'a Column> {
         let col = self.descriptor();
         match col.tform.storage() {
@@ -66,11 +58,10 @@ impl<'a> ColumnReader<'a> {
     }
 
     /// Decode a fixed-width column into `out` as a typed, row-flattened [`ColumnData`],
-    /// whose buffer it reuses when `out` already holds values of this column's type: an
-    /// `A` column keeps every row's field bytes exactly, padding and terminator included —
-    /// read one through [`CharacterField`](crate::table::CharacterField) — and every other
-    /// fixed kind decodes from the concatenated cell bytes. Variable-length (`P`/`Q`)
-    /// columns error here — use [`ColumnReader::vla_into`].
+    /// whose buffer it reuses when `out` already holds values of this column's type. An
+    /// `A` column keeps every row's field bytes exactly, padding and terminator included;
+    /// read one through [`CharacterField`](crate::table::CharacterField). Variable-length
+    /// (`P`/`Q`) columns error here — use [`ColumnReader::vla_into`].
     pub fn raw_into(&self, out: &mut ColumnData) -> Result<()> {
         let col = self.fixed_descriptor()?;
         col.decode_cells_into(self.table.cells(col), self.table.extent.row_count, out)

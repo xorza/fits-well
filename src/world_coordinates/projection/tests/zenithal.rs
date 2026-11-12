@@ -30,7 +30,7 @@ fn sin_keeps_its_digits_next_to_the_centre() {
 
 /// Next to the native pole the colatitude crosses each projection as an `f64` of its
 /// own, so a round trip keeps ζ to an ulp each way, where θ in degrees rounds at
-/// 1.4e-14°, 2.5e-16 rad: once all of ζ = 1e-15. The sweep holds each formula that
+/// 1.4e-14°, 2.5e-16 rad: all of ζ = 1e-15. The sweep holds each formula that
 /// carries ζ: the zenithals from ζ itself, and SIN and SZP from their depth
 /// σ = 1 − sin θ.
 #[test]

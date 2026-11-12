@@ -12,10 +12,10 @@ use crate::image_model::{flip_i8, flip_u16, flip_u32, flip_u64};
 use crate::ragged::RowValues;
 
 /// A typed integer realization of the FITS unsigned (and signed-byte) storage
-/// conventions — `BSCALE`/`BZERO` for images or `TSCALn`/`TZEROn` for table
-/// columns, with unit scale and the matching sign-bit offset. Values are exact (no
-/// `f64` rounding), recovered by flipping the stored sign bit. Filled for images and
-/// fixed columns, and held as the values of the one [`Ragged`](crate::table::Ragged)
+/// conventions: `BSCALE`/`BZERO` for images or `TSCALn`/`TZEROn` for table columns, with
+/// unit scale and the matching sign-bit offset. Values are exact across the whole 64-bit
+/// range (no `f64` rounding), recovered by flipping the stored sign bit. Filled for images
+/// and fixed columns, and held as the values of the one [`Ragged`](crate::table::Ragged)
 /// [`crate::table::ColumnReader::vla_unsigned`] gives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsignedData {
@@ -68,9 +68,6 @@ impl UnsignedData {
     /// Table 19 convention) by flipping the stored sign bit. `cells` is one contiguous
     /// run for an image or heap array, or one strided cell per row for a table column;
     /// `capacity` is the elements the cells hold in all, reserved fallibly.
-    ///
-    /// This is exact across the whole 64-bit range, unlike routing the same values
-    /// through the `f64` physical plane.
     pub(crate) fn from_be_cells<'a>(
         cells: impl Iterator<Item = &'a [u8]>,
         capacity: usize,

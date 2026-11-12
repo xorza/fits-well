@@ -22,7 +22,6 @@ fn gunzip_refuses_a_stream_larger_than_its_tile() {
     assert!(bomb.len() < 1000, "an all-zero buffer compresses tiny");
     let mut decoded = Vec::new();
     let mut inflate = Decompress::new(false);
-    // Bounded at 1 KiB (a small tile): inflating to 100 KB overruns → error.
     assert_matches!(
         gzip::gunzip_into(&bomb, 1024, &mut decoded, &mut inflate),
         Err(FitsError::CorruptCompressedData {
@@ -36,7 +35,6 @@ fn gunzip_refuses_a_stream_larger_than_its_tile() {
             defect: CompressedDataDefect::GzipOverrun
         })
     );
-    // Bounded at the true size: decodes to exactly the original bytes.
     gzip::gunzip_into(&bomb, big.len(), &mut decoded, &mut inflate).unwrap();
     assert_eq!(decoded, big);
 

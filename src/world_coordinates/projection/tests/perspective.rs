@@ -5,7 +5,7 @@ use crate::world_coordinates::projection::tests::*;
 /// The AZP inverse takes each root past the native pole round by −360° and keeps the
 /// larger, as wcslib's `azpx2s` does: with μ = 0.03 and γ = −56.46°, the point the forward
 /// gives for (φ, θ) = (−179.03°, −54.89°) deprojects back to it, where the root nearest
-/// the pole was refused (of a 1° grid, 7280 points failed so).
+/// the pole is refused (7280 points of a 1° grid).
 #[test]
 fn azp_inverse_takes_the_root_azpx2s_takes() {
     let mut pv = Projection::Azp.parameter_defaults();

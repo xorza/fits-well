@@ -107,9 +107,8 @@ fn physical_case<O: PhysicalSample>(b: &mut Bencher<'_>, bitpix: Bitpix, blank: 
 }
 
 /// `atomic/unsigned/<type>`: the exact reinterpretation of a stored signed integer as its
-/// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a new row:
-/// the case times that row's allocation too, until the unsigned read fills the caller's
-/// buffer.
+/// unsigned type under the FITS sign-bit `BZERO` (a `u8` as signed bytes), into a reused
+/// [`UnsignedData`].
 fn unsigned(c: &mut Criterion) {
     let mut group = Kind::Atomic.group(c, "unsigned", Scale::Row);
     for bitpix in BITPIXES.into_iter().filter(|bitpix| bitpix.is_integer()) {

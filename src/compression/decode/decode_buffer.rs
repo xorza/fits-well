@@ -60,7 +60,6 @@ impl<'a> DecodeBuffer<'a> {
         }
     }
 
-    /// Whether this buffer holds no sample.
     pub(super) const fn is_empty(&self) -> bool {
         match self {
             DecodeBuffer::U8(out) => out.is_empty(),

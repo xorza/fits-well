@@ -19,8 +19,7 @@ fn x_bit_column_unpacks_msb_first() {
         bits.row(0),
         bitvec![u8, Msb0; 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0].as_bitslice()
     );
-    // The rows iterate from a column read in one expression, by value and by
-    // reference, with an exact count.
+    // The rows iterate by value and by reference, with an exact count.
     let rows: Vec<_> = table.column(0).unwrap().bits().unwrap().iter().collect();
     assert_eq!(rows, [bits.row(0)]);
     assert_eq!((&bits).into_iter().len(), 1);

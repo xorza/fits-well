@@ -20,8 +20,7 @@ use crate::fits_error::Result;
 use std::ops::Range;
 
 /// Everything a tiled image's decode needs from its container table, beside what the
-/// header fixed for every decode in `TiledImage` — grouped by the concern each part
-/// serves rather than held as one flat bag.
+/// header fixed for every decode in `TiledImage`.
 #[derive(Debug)]
 pub(super) struct ImageDecodePlan<'a> {
     pub(super) geometry: &'a TileGeometry,

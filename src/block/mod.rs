@@ -1,8 +1,7 @@
 //! The 2880-byte block grid — the I/O quantum of FITS.
 //!
-//! Every header unit and every data unit occupies a whole number of 2880-byte
-//! blocks, with the final block padded to fill the boundary. Because of this, a
-//! conforming file's length on disk is always a multiple of [`BLOCK_SIZE`].
+//! Every header unit and every data unit occupies a whole number of 2880-byte blocks,
+//! so a conforming file's length is a multiple of [`BLOCK_SIZE`].
 
 /// The fundamental layout unit: 2880 bytes = 36 × 80-byte cards.
 pub const BLOCK_SIZE: usize = 2880;
@@ -19,10 +18,7 @@ pub(crate) const SPACE_FILL: u8 = b' ';
 /// Fill byte for all data units except ASCII tables: NUL (all bits zero).
 pub(crate) const ZERO_FILL: u8 = 0;
 
-/// Number of whole 2880-byte blocks needed to hold `len` bytes, rounding up.
-///
-/// `blocks_for(0) == 0` — a zero-length unit (e.g. `NAXIS = 0` data) occupies no
-/// blocks at all.
+/// Number of whole blocks needed to hold `len` bytes; 0 for a zero-length unit.
 const fn blocks_for(len: u64) -> u64 {
     len.div_ceil(BLOCK_SIZE as u64)
 }
@@ -36,10 +32,8 @@ pub(crate) const fn padded_len(len: u64) -> Option<u64> {
 /// Fill bytes needed to round `len` up to the next 2880-byte boundary; `0` when it
 /// already sits on one.
 ///
-/// The in-memory counterpart to [`padded_len`], for the writer: one call site pads a
-/// buffer it holds, the other streams the fill straight to the sink and never
-/// materializes the padded unit at all, so they share the length rather than the
-/// rounding.
+/// The fill length of [`padded_len`]'s rounding, for a writer that emits the fill
+/// separately from the unit.
 pub(crate) const fn padding(len: usize) -> usize {
     (BLOCK_SIZE - len % BLOCK_SIZE) % BLOCK_SIZE
 }

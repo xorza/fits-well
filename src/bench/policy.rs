@@ -37,7 +37,7 @@ pub(crate) fn section_rows(tiles: Option<&[usize]>) -> usize {
 pub(crate) enum Kind {
     /// One operation on the unit the read and write paths hand it.
     Atomic,
-    /// A public entry point end to end on the standard frame.
+    /// A public entry point end to end on a scene input.
     Integration,
 }
 

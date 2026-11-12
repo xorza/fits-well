@@ -49,7 +49,6 @@ pub struct RandomGroupsMetadata<'a> {
     pub parameter_names: &'a [Option<String>],
     /// Per-group array shape, with the `NAXIS1 = 0` sentinel omitted.
     pub group_shape: &'a [usize],
-    /// Number of stored groups.
     pub gcount: usize,
     /// Number of parameters preceding each group's array.
     pub pcount: usize,
@@ -80,7 +79,6 @@ pub struct RandomGroupView<'a> {
 }
 
 impl RandomGroups {
-    /// Borrow the random-groups geometry, parameter names, and stored type.
     pub fn metadata(&self) -> RandomGroupsMetadata<'_> {
         RandomGroupsMetadata {
             parameter_names: &self.parameter_names,
@@ -151,9 +149,8 @@ impl RandomGroups {
         self.array_len
     }
 
-    /// Borrow the exact host-endian stored values for group `index`, before
-    /// `PSCALn`/`PZEROn` or `BSCALE`/`BZERO` conversion. This preserves all integer
-    /// values and floating-point bit patterns that the physical `f64` APIs cannot.
+    /// Borrow the host-endian stored values of group `index`, before any `PSCALn`/`PZEROn` or
+    /// `BSCALE`/`BZERO` conversion, so integers and float bit patterns stay exact.
     pub fn group(&self, index: usize) -> Result<RandomGroupView<'_>> {
         let start = self.checked_group_base(index)?;
         let group_len = self.group_len();

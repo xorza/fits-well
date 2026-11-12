@@ -37,10 +37,9 @@ pub(super) enum Overshoot {
     Refuse,
 }
 
-/// The decode parameters constant across all of a tiled image's tiles: the codec,
-/// the integer plane the tiles are stored in (and, for a float image, its float
-/// `ZBITPIX`), and the codec knobs. Every per-tile entry point hangs off this, so
-/// the helpers take one decoder rather than a long parameter list.
+/// The decode parameters constant across all of a tiled image's tiles: the codec with its
+/// knobs, the integer plane the tiles are stored in and, for a float image, its float
+/// `ZBITPIX`.
 #[derive(Debug)]
 pub(super) struct TileDecoder {
     /// The `ZCMPTYPE` codec with its `ZNAMEi`/`ZVALi` parameters.

@@ -1,10 +1,9 @@
 //! [`Keyword`], its stack-allocated formatting, and the index of an indexed keyword.
 //!
-//! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up
-//! constantly while reading and writing. Building each with `format!` heap-
-//! allocates a throwaway `String` per lookup — a single [`crate::world_coordinates::Wcs`] parse does
-//! ~90 of them. A conforming keyword is at most 8 bytes, so `Keyword::try_from` on
-//! `format_args!` formats it into a fixed stack buffer and checks it instead.
+//! Indexed keywords (`NAXIS3`, `PV2_15`, `CD1_2`, `CTYPE1`) are looked up constantly, and
+//! `format!` would heap-allocate a `String` per lookup. A conforming keyword is at most 8
+//! bytes, so `Keyword::try_from` on `format_args!` formats it into a fixed stack buffer and
+//! checks it instead.
 
 use core::fmt;
 use std::str::FromStr;

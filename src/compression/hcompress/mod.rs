@@ -1,10 +1,10 @@
 //! `HCOMPRESS_1` tile codec — a port of cfitsio's 64-bit
 //! `fits_hdecompress64`/`fits_hcompress64`.
 //!
-//! Decoding is: read the header + quadtree-coded bit planes (`decode`/`dodecode`/
-//! `qtree_decode`), undigitize (multiply by the scale), then invert the
-//! H-transform (`hinv`). Encoding is the mirror: forward H-transform (`htrans`),
-//! digitize, then quadtree bit-plane coding (`encode`/`doencode`/`qtree_encode`).
+//! Decoding reads the header and quadtree-coded bit planes (`hdecompress_into`/`dodecode`/
+//! `qtree_decode`), undigitizes (multiplies by the scale), then inverts the H-transform
+//! (`hinv`). Encoding mirrors it: forward H-transform (`htrans`), digitize, then quadtree
+//! bit-plane coding (`encode`/`doencode`/`qtree_encode`).
 //! Decode supports `SMOOTH = 1` (inverse-transform smoothing) and lossy
 //! `scale > 0`; encode supports lossless and lossy (`scale`) but always
 //! `SMOOTH = 0`. Encoding rejects a tile when an H-transform intermediate
@@ -351,8 +351,7 @@ impl<'a> BitOutput<'a> {
         }
     }
 
-    /// Write the header, extract sign bits, compute per-quadrant bit-plane counts,
-    /// quadtree-encode the planes, then append the sign bytes (cfitsio `encode`).
+    /// cfitsio `encode`: header, quadtree-coded planes, then the sign bytes.
     fn encode(
         &mut self,
         a: &mut [i64],
@@ -1089,11 +1088,9 @@ impl Codec {
         };
         let nx = dimension(bi.readint()?)?;
         let ny = dimension(bi.readint()?)?;
-        // nx/ny come from the untrusted stream; cross-check them against the tile's
-        // known shape before allocating/transforming, so swapped axes do not decode
-        // transposed. cfitsio sizes from these blindly — guarding here stops a hostile
-        // header from driving a wild `nx*ny` allocation (or an empty-buffer panic at `a[0]`
-        // below).
+        // nx/ny come from the untrusted stream: checking them against the tile's shape keeps
+        // swapped axes from decoding transposed, and a hostile header from driving a wild
+        // `nx*ny` allocation or an empty-buffer panic at `a[0]`. cfitsio sizes from them blindly.
         if tile_nx * tile_ny == 0 || (nx, ny) != (tile_nx, tile_ny) {
             return Err(HcompressDefect::TileDimensions.into());
         }

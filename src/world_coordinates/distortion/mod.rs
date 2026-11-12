@@ -30,7 +30,7 @@ impl Distortion {
 
 /// Whether `residual` is within the tolerance of `target`: 1e-13, absolute below 1 and
 /// relative to `|target|` above it, as wcslib's iterative inverse stops (`dis.c`,
-/// `disx2p`); an absolute 1e-13 is under the spacing of a double past about 450.
+/// `disx2p`); an absolute 1e-13 is under the spacing of a double from 512 up.
 fn converged(residual: f64, target: f64) -> bool {
     residual.abs() <= 1e-13 * target.abs().max(1.0)
 }

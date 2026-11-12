@@ -17,7 +17,7 @@ use crate::world_coordinates::tabular::internals::{
 };
 
 /// `atomic/parse_wcs/light`: the light's plate solution read from its header by
-/// `Wcs::from_header`, as a caller reads it once an HDU. Per card of the header.
+/// `Wcs::from_header`, as a caller reads it once per HDU. Per card of the header.
 ///
 /// `atomic/to_world/<axes>` and `atomic/to_pixel/<axes>`: one row of the standard frame's
 /// pixels, one call a point, through `Wcs::pixel_to_world` and back through

@@ -669,8 +669,7 @@ fn missing_mandatory_keyword_is_reported() {
 
 #[test]
 fn naxis_beyond_999_is_refused() {
-    // §4.4.1 caps NAXIS at 999; an absurd value must error rather than drive
-    // `Vec::with_capacity(NAXIS)` in `axes()` (an allocation DoS from a tiny header).
+    // §4.4.1 caps NAXIS at 999; a larger one must error, not size the `axes()` allocation.
     let mut h = Header::new();
     h.set_internal(keywords::NAXIS, 1000);
     assert_matches!(

@@ -44,9 +44,8 @@ pub struct FitsWriter<W> {
     sink: W,
     state: WriterState,
     form: HeaderForm,
-    /// Reused buffer the data unit is assembled into before padding + writing, so
-    /// writing many HDUs allocates no per-call staging. Each high-level write
-    /// `clear`s it, builds the unit, and hands it to the HDU commit path.
+    /// Reused buffer the data unit is assembled into, so writing many HDUs allocates no
+    /// per-call staging.
     scratch: Vec<u8>,
     /// Reused block-padded header serialization, kept separate because checksum
     /// generation needs the header and data bytes alive at the same time.
@@ -189,10 +188,9 @@ impl<W: Write> FitsWriter<W> {
     /// render everything fallible before the first byte, then write the empty primary an
     /// extension written first needs, the header, `body` and its fill.
     ///
-    /// The template merge lives here rather than in each header builder, so every
-    /// write that commits an HDU applies it and none of the builders has to remember
-    /// to. The one write that does not commit through here is [`ImageWriter`], which
-    /// writes its header up front and rewrites it at `finish`; it merges its own.
+    /// The template merge lives here, not in each header builder, so no builder has to
+    /// remember it. [`ImageWriter`] writes its header up front and rewrites it at
+    /// `finish`, so it merges its own.
     ///
     /// Errors with [`FitsError::DataSizeMismatch`] when the header's data unit is not
     /// `body`'s length, which only a raw write's caller can give.
@@ -446,12 +444,11 @@ impl<W: Write> FitsWriter<W> {
         self.write_encoded(|data| table.encode(data), header)
     }
 
-    /// Write a binary table as a `BINTABLE` extension. A dataless primary HDU is
-    /// written automatically first if nothing has been written yet (a table can
-    /// never be the primary HDU). Fixed-width and variable-length (`P`/`Q`) columns
-    /// are both supported, including jagged `PX`/`QX` bit arrays — VLA columns
-    /// write a heap after the main table. The non-structural cards of `header` are
-    /// kept; the table-layout and checksum cards are generated from `table`.
+    /// Write a binary table as a `BINTABLE` extension, after a dataless primary if nothing
+    /// is written yet (a table is never the primary). Fixed-width and variable-length
+    /// (`P`/`Q`) columns are supported, including jagged `PX`/`QX` bit arrays; VLA columns
+    /// write a heap after the main table. The non-structural cards of `header` are kept;
+    /// the table-layout and checksum cards are generated from `table`.
     pub fn write_table(&mut self, table: &Builder, header: Option<&Header>) -> Result<()> {
         self.next_position()?;
         let LaidOut {

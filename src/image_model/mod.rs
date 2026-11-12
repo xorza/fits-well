@@ -5,10 +5,9 @@
 //! a read swaps a data unit into an owned, host-endian [`Data`]
 //! and [`View::encode_into`](crate::image_model::view::View::encode_into) writes them back. When no swap is needed
 //! (`BITPIX = 8`) an in-memory reader can skip even that copy and borrow the data
-//! unit in place — see [`crate::ImageReader::view`]. The per-element swap loops are
-//! memory-bandwidth-bound, so they lean on autovectorization rather than threads
-//! (the thread-parallel layer is the compute-bound tiled codecs in the `compress`
-//! module, not this path).
+//! unit in place — see [`crate::ImageReader::view`]. The swap loops are memory-bandwidth-bound,
+//! so they lean on autovectorization rather than threads; threads serve the compute-bound
+//! tiled codecs of the `compress` module.
 
 #[cfg(feature = "internals")]
 pub(crate) mod bench;
@@ -108,9 +107,8 @@ pub(crate) const U64_OFFSET_INTEGER: u64 = 1_u64 << 63;
 pub(crate) const U64_OFFSET: f64 = U64_OFFSET_INTEGER as f64;
 
 /// The same offsets in the integer domain. Stored and physical differ by exactly the
-/// sign bit, so the conversion is a XOR — and, being its own inverse, the identical
-/// mask serves both reading a stored value and storing a physical one. Each mask is
-/// written once here rather than inline at every conversion.
+/// sign bit, so the conversion is a XOR, its own inverse: one mask serves reading a stored
+/// value and storing a physical one.
 const I8_SIGN: u8 = 0x80;
 const U16_SIGN: u16 = 0x8000;
 const U32_SIGN: u32 = 0x8000_0000;

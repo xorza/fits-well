@@ -11,8 +11,8 @@ use crate::world_coordinates::world_unit::WorldUnit;
 use std::iter;
 
 /// The table axes a transform takes, so a point's interpolation and its inverse search
-/// work in fixed arrays on the stack: 2⁷ corners of 7 coordinates, 7.5 KB, at most,
-/// within clippy's 16 KiB bound on a local array.
+/// work in fixed arrays on the stack: at most 7.3 KiB (2⁷ corners of 7 coordinates, and the
+/// rest of the search state), within clippy's 16 KiB bound on a local array.
 const MAX_TABLE_AXES: usize = 7;
 const MAX_INVERSE_WORK: usize = 1 << 22;
 /// The reals a point's search holds at most: six per table axis, then the corners.

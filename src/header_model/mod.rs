@@ -69,10 +69,8 @@ impl Header {
     /// Parse a header unit from its raw bytes (a whole number of 80-byte cards;
     /// the reader supplies block-aligned input). Stops at the `END` record.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        // One record per card is the upper bound (CONTINUE folding only merges,
-        // never adds; commentary records skip the index), so reserve both once and
-        // let parsing fill them without the grow-reallocations a small header would
-        // otherwise pay on every push.
+        // One record per card bounds both: CONTINUE folding only merges, and commentary skips
+        // the index.
         let ncards = bytes.len() / CARD_SIZE;
         let mut header = Self {
             records: Vec::with_capacity(ncards),
@@ -335,11 +333,8 @@ impl Header {
             .position(|record| record.is_named(&name)))
     }
 
-    /// Every stored record in file order, as a [`RecordView`] — duplicates and order
-    /// preserved (the whole point of the ordered model), so `COMMENT`/`HISTORY` runs
-    /// and repeated keywords come through intact. The implicit `END` is not a record
-    /// and is never yielded. A valued record is [`RecordView::Valued`], with its
-    /// [`Keyword`].
+    /// Every stored record in file order, as a [`RecordView`], duplicates included. The
+    /// implicit `END` is not a record and is never yielded.
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             records: self.records.iter(),
@@ -366,9 +361,7 @@ impl Header {
     /// `NAXIS` — the number of axes (0 means no data array).
     pub(crate) fn naxis(&self) -> Result<usize> {
         let n = self.require_usize(keywords::NAXIS)?;
-        // §4.4.1: `0 ≤ NAXIS ≤ 999`. Rejecting an out-of-range value is both
-        // conformance and a guard — `axes()` reserves `Vec::with_capacity(NAXIS)`,
-        // so an absurd `NAXIS` from an untrusted header would otherwise abort.
+        // §4.4.1: `0 ≤ NAXIS ≤ 999`; also keeps `axes()` from reserving an absurd capacity.
         if n > 999 {
             return Err(FitsError::InvalidKeywordValue {
                 keyword: keywords::NAXIS,
@@ -982,7 +975,7 @@ fn fold_continuation(records: &mut [Record], substring: &str, fragment: Option<&
     if !acc.ends_with('&') {
         return false;
     }
-    acc.pop(); // drop the continuation flag
+    acc.pop();
     acc.push_str(substring);
     if let Some(fragment) = fragment {
         match comment {

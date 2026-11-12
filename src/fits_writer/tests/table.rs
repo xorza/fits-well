@@ -159,7 +159,6 @@ fn writes_tdim_p_q_vla_and_bit_columns() {
         assert_eq!(encoded, unit, "{chunk_bytes}");
     }
 
-    // TDIM parsed back as a shape.
     assert_eq!(metadata.columns[0].tdim().unwrap(), Some(&[2, 2][..]));
     // P/Q descriptors with TDIM accept an empty row and validate the nonempty row.
     assert_eq!(

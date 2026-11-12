@@ -76,8 +76,7 @@ impl Tform {
     /// The number of bytes this column occupies in every row.
     pub const fn byte_width(self) -> usize {
         match self.storage {
-            // Saturating: an absurd `repeat` from a hostile `TFORMn` saturates to
-            // `usize::MAX` rather than wrapping to a small width that could slip
+            // Saturating: a hostile `repeat` must not wrap to a small width that slips
             // past the row-width check in `Schema::parse`.
             Storage::Fixed => match self.element.payload_len(self.repeat) {
                 Some(len) => len,

@@ -160,9 +160,8 @@ impl<S: Source> FitsReader<S> {
     /// caller-owned buffer: its [`Hdu::data_bytes`](Hdu#structfield.data_bytes), without
     /// the block fill after them.
     ///
-    /// This is the owned form, backing the table readers (which keep the bytes as
-    /// the parsed table's storage). An image read fills the caller's buffer or an owned
-    /// image from the source's bytes, a run at a time — see [`FitsReader::image`].
+    /// For an image, [`FitsReader::image`] reads into the caller's buffer or an owned image
+    /// instead.
     pub fn read_data_unit<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Vec<u8>> {
         let hdu = self.hdus.select(hdu.into())?;
         self.data.data_unit(hdu)
@@ -393,7 +392,7 @@ impl<S: Source> FitsReader<S> {
         Wcs::from_header_with_tabular(header, alt, transforms)
     }
 
-    /// Read an `TABLE` (ASCII table) extension and parse its column structure.
+    /// Read a `TABLE` (ASCII table) extension and parse its column structure.
     /// Errors with [`FitsError::HduKindMismatch`] for any other HDU.
     pub fn read_ascii_table<'h>(&mut self, hdu: impl Into<HduSelector<'h>>) -> Result<Ascii> {
         let hdu = self.hdus.select(hdu.into())?;

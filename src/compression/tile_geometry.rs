@@ -7,7 +7,7 @@ use crate::fits_error::Result;
 
 /// The tiling of an N-d image: axis lengths, per-axis tile sizes, and the derived
 /// strides and per-axis tile counts. Iterating `0..ntiles()` and calling `tile_into`
-/// yields each tile's clipped dimensions and flat pixel indices.
+/// yields each tile's clipped dimensions and the flat starts of its rows.
 #[derive(Debug)]
 pub(super) struct TileGeometry {
     dims: Vec<usize>,
@@ -50,23 +50,20 @@ pub(super) struct PlanePart<'a, D> {
     pub(super) start: usize,
 }
 
-/// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] each
-/// iteration so a tile loop allocates these buffers once instead of per tile
-/// (the `row_bases` buffer is `row_count` long — the dominant per-tile cost).
+/// Reusable per-tile scratch, filled by [`TileGeometry::tile_into`] so a tile loop
+/// allocates these buffers once, not per tile (`row_bases` is the dominant cost).
 #[derive(Debug, Default)]
 pub(super) struct TileScratch {
-    /// Per-axis origin of the current tile (scratch for the index computation).
+    /// Per-axis origin of the current tile.
     pub(super) origin: Vec<usize>,
-    /// Edge-clipped per-axis extent of the tile (`ny` fastest); used by HCOMPRESS.
+    /// Edge-clipped per-axis extent of the tile, fastest axis first.
     pub(super) tdims: Vec<usize>,
     /// Flat start of each contiguous tile row in the full image (length = the product
-    /// of `tdims[1..]`). Axis 0 has stride 1, so a row is `row_len` contiguous
-    /// elements — gather/scatter copy it as a slice instead of per-pixel indexing.
+    /// of `tdims[1..]`). Axis 0 has stride 1, so a row is `row_len` contiguous elements.
     pub(super) row_bases: Vec<usize>,
     /// Elements per row (`tdims[0]`): the fastest-axis extent.
     pub(super) row_len: usize,
-    /// Per-axis local coordinate, the odometer state [`TileGeometry::tile_into`]
-    /// walks (over the higher axes) to emit `row_bases` without per-pixel division.
+    /// The odometer over the higher axes that [`TileGeometry::tile_into`] walks.
     coord: Vec<usize>,
 }
 
@@ -271,12 +268,9 @@ impl TileGeometry {
             s.origin.push(origin);
             s.tdims.push(self.tiles[i].min(self.dims[i] - origin));
         }
-        // Axis 0 has stride 1, so each tile row is `row_len` contiguous elements and the
-        // tile is `row_count` such rows (the product of the higher-axis extents). Emit only
-        // the row starts — walking the *higher* axes as an odometer, `flat` maintained
-        // by stride adds with no per-pixel division — and let gather/scatter copy each
-        // row as a contiguous slice. The row order matches a row-major pixel walk, so
-        // decoded values still land in the right pixels.
+        // Only the row starts are emitted, by an odometer over the higher axes that keeps
+        // `flat` by stride adds, with no per-pixel division. The row order is a row-major
+        // pixel walk.
         s.row_len = if n == 0 { 1 } else { s.tdims[0] };
         let row_count: usize = if n <= 1 {
             1
@@ -350,8 +344,7 @@ mod tests {
 
     #[test]
     fn tile_into_rows_match_layout() {
-        // Expand the row representation (row_bases + row_len) back to the full flat-index
-        // list it stands for, so the hand-computed expectations still describe pixels.
+        // Expands the rows back to the flat pixel indices the expectations are written in.
         fn flat(s: &TileScratch) -> Vec<usize> {
             let mut v = Vec::new();
             for &b in &s.row_bases {

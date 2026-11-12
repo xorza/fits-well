@@ -801,9 +801,8 @@ fn degenerate_cone_and_cea_parameters_are_invalid() {
     assert_eq!(degenerate("CEA", &[0.0, 1.0]), None);
 }
 
-/// Parameters as given, unvalidated: the kernels' own tests reach past the header path.
-/// The kernel of `projection` with `parameters` as its first `PVi_m`, the rest 0,
-/// taken as given.
+/// The kernel of `projection` with `parameters` as its first `PVi_m`, the rest 0, unvalidated:
+/// the kernels' own tests reach past the header path.
 fn raw(projection: Projection, parameters: &[f64]) -> ProjectionParameters {
     projection.raw_parameters(pv(parameters))
 }
@@ -944,8 +943,8 @@ fn plane_points_without_a_world_point_are_refused() {
     }
 }
 
-/// Near their limits the conic, Airy and polyconic formulas once cancelled to
-/// nothing: at η = 1e-7° a COO cone constant lost half its digits, at ξ = 1e-8 rad
+/// Near their limits the conic, Airy and polyconic formulas cancel to nothing unless
+/// written to avoid it: at η = 1e-7° a COO cone constant lost half its digits, at ξ = 1e-8 rad
 /// cos ξ rounded to 1 and the Airy constant came out 0 rather than −1/2, and near the
 /// equator 1 − cos ω rounded away the polyconic's y offset.
 #[test]
@@ -967,9 +966,8 @@ fn near_limit_projection_formulas_keep_their_precision() {
 
     // AIR: K = −1/2 + ξ²/4 + …, so −1/2 to the last bit at ξ = 1e-8.
     assert_eq!(Air::new(90.0 - 2.0 * 1e-8 * R2D).k, -0.5);
-    // The inverse at a tiny colatitude, which a fixed 1e-6 start and an absolute
-    // residual stop once returned with a relative error of 1e-3, and a residual stop of
-    // 1e-12 with 6.5e-14 at ζ = 1e-6.
+    // The inverse at a tiny colatitude: a fixed 1e-6 start with an absolute residual stop
+    // has a relative error of 1e-3, and a residual stop of 1e-12 has 6.5e-14 at ζ = 1e-6.
     let air = Air::new(45.0);
     for zeta in [1e-9, 1e-6, 1e-3, 1.0, 2.5, 3.0] {
         let back = air.zeta(air.radius(zeta)).unwrap();

@@ -109,8 +109,7 @@ fn validates_encoding_and_refuses_malformed_streams() {
     );
 }
 
-/// The encoder before runs were passed whole: a port of cfitsio's `pl_p2li` that
-/// steps one pixel at a time.
+/// The reference encoder: a port of cfitsio's `pl_p2li` that steps one pixel at a time.
 fn reference_encode(offset: i64, values: &[i64]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut ll = Words::new(&mut out);

@@ -229,7 +229,7 @@ fn stem(name: &str, alt: Alternate) -> Option<&str> {
     }
 }
 
-/// The indices of a `{root}i_m` name (`PC1_2`, `PV2_0`); `m` may be 0 for `PV`/`PS`.
+/// The indices of a `{root}i_m` name (`PC1_2`, `PV2_0`); `m` may be 0, which `PV` and `PS` use.
 fn pair_index(stem: &str, root: &str) -> Option<[usize; 2]> {
     let (i, m) = stem.strip_prefix(root)?.split_once('_')?;
     let m = if m == "0" {

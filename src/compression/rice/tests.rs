@@ -146,7 +146,7 @@ fn truncated_stream_is_refused() {
     );
 }
 
-/// The bit reader the decode used before its refill-once reader, kept to cross-check it.
+/// A reference bit reader, to cross-check the refill-once reader.
 #[derive(Debug)]
 struct ReferenceReader<'a> {
     bytes: &'a [u8],
@@ -246,7 +246,7 @@ impl<'a> ReferenceReader<'a> {
     }
 }
 
-/// The decode before its refill-once reader, kept to cross-check it.
+/// A reference decode over [`ReferenceReader`], to cross-check the refill-once decode.
 fn reference_decode(
     codec: rice::Codec,
     bytes: &[u8],
@@ -368,7 +368,7 @@ fn decode_matches_the_reference_decode() {
     }
 }
 
-/// The bit writer the encode used before it flushed 32 bits at a time, kept to cross-check it.
+/// A reference bit writer, to cross-check the one that flushes 32 bits at a time.
 #[derive(Debug)]
 struct ReferenceOutput<'a> {
     out: &'a mut Vec<u8>,
@@ -437,7 +437,7 @@ impl<'a> ReferenceOutput<'a> {
     }
 }
 
-/// The encode before it flushed 32 bits at a time, kept to cross-check it.
+/// A reference encode over [`ReferenceOutput`], to cross-check the 32-bit-flush encode.
 fn reference_encode(codec: rice::Codec, values: &[i64]) -> Vec<u8> {
     let rice::Codec { blocksize, bytepix } = codec;
     let (mut diffs, mut stream) = (Vec::new(), Vec::new());

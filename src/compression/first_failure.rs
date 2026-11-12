@@ -28,8 +28,7 @@ where
 }
 
 /// What an item of [`try_map_init`] leaves: `None` where it skipped. The error is boxed, as a
-/// `FitsError` is 64 B and every item holds the slot: a slot of a 24 B value stays 24 B, as
-/// before an item kept its error.
+/// `FitsError` is 64 B and every item holds the slot: a slot of a 24 B value stays 24 B.
 type Slot<T> = Option<std::result::Result<T, Box<FitsError>>>;
 
 /// `f` of each index of `indices` with a scratch from `init`, in order, as rayon's
@@ -115,8 +114,7 @@ mod tests {
         assert_eq!(doubled, (0..10).map(|index| index * 2).collect::<Vec<_>>());
     }
 
-    /// A slot costs what a value alone did, the error boxed: 24 B for a tile's compressed bytes,
-    /// where an unboxed 64 B `FitsError` made it 64 B.
+    /// With the error boxed, a slot costs what its value alone does: 24 B for a tile's bytes.
     #[test]
     fn a_slot_is_as_small_as_its_value() {
         assert_eq!(size_of::<FitsError>(), 64);

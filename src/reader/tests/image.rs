@@ -563,10 +563,10 @@ fn reader_keeps_the_tile_index_of_each_compressed_image() {
     }
 }
 
-/// `finish_bytes` bounds what the finish adds to the reader: for a stream, its staging
-/// buffer grown past the one block the header scan left in it to the padded unit, which
-/// is under the 1 MiB a finish reads at a time; nothing for a resident source, which the
-/// finish borrows. `tiles` gives a compressed image's `ZTILEn`, and none of a plain image.
+/// `finish_bytes` bounds what the finish adds to the reader: for a stream, its empty
+/// staging buffer grown to the padded unit, which is under the 1 MiB a finish reads at a
+/// time; nothing for a resident source, which the finish borrows. `tiles` gives a
+/// compressed image's `ZTILEn`, and none of a plain image.
 #[cfg(feature = "compression")]
 #[test]
 fn finish_bytes_counts_a_streams_staging_and_tiles_give_the_tiling() {

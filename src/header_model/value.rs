@@ -135,10 +135,8 @@ impl TryFrom<&FitsInteger> for i64 {
     }
 }
 
-/// Widths that may not fit `i64` and so fall back to the decimal representation.
-/// `i32`/`u32`/`u16`/`i64` are written out separately below: their `i64::try_from` can
-/// never fail, and spelling an infallible conversion fallibly is both misleading and
-/// a clippy lint.
+/// Widths that may not fit `i64` and fall back to the decimal representation. `i32`, `u32`,
+/// `u16` and `i64` are written out below: their `i64::try_from` cannot fail.
 macro_rules! impl_integer_from {
     ($($type:ty),+ $(,)?) => {
         $(
@@ -197,9 +195,8 @@ pub(crate) fn fits_i64(value: usize) -> Result<i64> {
 
 /// The typed value of a valued keyword record (§4.2).
 ///
-/// The three string-ish "no real value" cases of §4.2.1 are kept distinct: a
-/// quoted empty/null string is [`Value::Text`] (possibly empty), whereas a blank
-/// value field with no quotes is [`Value::Undefined`].
+/// A quoted empty string is [`Value::Text`] (§4.2.1), whereas a blank value field with no
+/// quotes is [`Value::Undefined`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// `T` or `F`.
@@ -241,10 +238,8 @@ impl Value {
     pub fn as_integer(&self) -> Result<Option<i64>> {
         match self {
             Self::Integer(i) => Ok(Some(i64::try_from(i)?)),
-            // A mandatory-integer keyword written in real form (e.g. `NAXIS = 2.0`):
-            // accept an integral value rather than reporting it absent, which would
-            // silently mis-size the data unit. Reject integral reals outside i64
-            // instead of accepting Rust's saturating float-to-integer cast.
+            // A mandatory-integer keyword in real form (`NAXIS = 2.0`) is accepted, as reporting
+            // it absent would mis-size the data unit; outside `i64` it is refused, not saturated.
             Self::Real(r) if r.fract() == 0.0 => {
                 const I64_MIN_F64: f64 = i64::MIN as f64;
                 const I64_MAX_EXCLUSIVE_F64: f64 = -I64_MIN_F64;
@@ -323,8 +318,7 @@ macro_rules! impl_value_from_integer {
     };
 }
 
-// Every integer width `FitsInteger` accepts, wrapped identically — unlike the
-// `FitsInteger` conversions above, none of these needs a fallible narrowing.
+// Every width `FitsInteger` accepts, wrapped identically.
 impl_value_from_integer!(i32, i64, i128, u16, u32, u64, u128, usize);
 
 impl From<f64> for Value {

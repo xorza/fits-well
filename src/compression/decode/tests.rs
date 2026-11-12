@@ -110,8 +110,8 @@ fn decompresses_nocompress_tile_verbatim() {
 /// A tile's values must fit the image's `BITPIX` before they narrow. The 16-bit image
 /// here holds 40000 and −40000, which `i16` cannot: stored losslessly (a `1PJ`
 /// `UNCOMPRESSED_DATA` cell) that is corrupt data and refused, while HCOMPRESS, whose
-/// lossy reconstruction may overshoot, clamps them to 32767 and −32768 — where a
-/// plain `as i16` gave −25536 and 25536.
+/// lossy reconstruction may overshoot, clamps them to 32767 and −32768, not the −25536
+/// and 25536 a plain `as i16` wraps to.
 #[test]
 fn decoded_values_fit_the_image_bitpix() {
     let values = [40_000i64, -40_000, 7, 8];

@@ -199,8 +199,8 @@ fn tiles_under_four_pixels_are_refused() {
     }
 }
 
-/// Lossless tiles whose halves turn odd on both axes at once, the corner the inverse
-/// transform once misplaced, round-trip exactly beside ones that never do (64×64,
+/// Lossless tiles whose halves turn odd on both axes at once, a corner of the inverse
+/// transform, round-trip exactly beside ones that never do (64×64,
 /// 24×16); 6000×40 takes the default tiling, two 16-row tiles and an 8-row one.
 /// HCOMPRESS takes a tile of any rank with two extents above 1, its plane in those two
 /// axes: a cube in `[17, 9, 1]` tiles (axes 1 and 2), one in `[17, 1, 6]` tiles (axes 1

@@ -23,8 +23,6 @@ fn image(samples: Data, scaling: Scaling) -> Image {
     }
 }
 
-/// Encode to a fresh buffer — the allocating shorthand over `encode_into` the
-/// round-trip tests read against.
 #[test]
 fn shape_product_handles_empty_axes_and_refuses_overflow() {
     assert_eq!(shape_product(&[]).unwrap(), 0);
@@ -590,10 +588,8 @@ fn sample_type_resolves_unsigned_and_signed_byte_conventions() {
         SampleType::U16
     );
 
-    // ...but it does disqualify the *exact* view: a BLANK sample has no integer
-    // value to recover. `Scaling::unsigned_kind` is where that guard lives, and it
-    // is the one resolution both the image (`BZERO`/`BLANK`) and binary-table
-    // (`TZEROn`/`TNULLn`) paths go through — so the two cannot disagree.
+    // ...but it does disqualify the *exact* view: a BLANK sample has no integer value to
+    // recover. `Scaling::unsigned_kind` guards that for the image and binary-table paths alike.
     assert_eq!(with_blank.unsigned_kind(Bitpix::I16), None);
     assert_eq!(
         s(1.0, U16_OFFSET).unsigned_kind(Bitpix::I16),

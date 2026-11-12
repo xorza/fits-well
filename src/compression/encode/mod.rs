@@ -37,9 +37,7 @@ use crate::image_model::view::Borrowed;
 use crate::keyword::Keyword;
 
 /// Tile-encode scratch, reused across the run of tiles one rayon job handles (via
-/// `map_tiles`'s `init`): the tile geometry plus the gather and codec workspaces. Reusing
-/// them means a run of tiles allocates its scratch once, beside each tile's retained
-/// compressed output.
+/// `map_tiles`'s `init`): the tile geometry plus the gather and codec workspaces.
 #[derive(Debug, Default)]
 struct EncodeScratch {
     tile: TileScratch,
@@ -94,13 +92,10 @@ pub(crate) fn compress_image(
     let geom = TileGeometry::new(dims, tiles.as_slice());
     let ntiles = tile_count(total, &geom);
 
-    // Compress every tile independently (the compute-bound step — parallel under
-    // the `parallel` feature). The heap layout is sequential (each descriptor's
-    // offset is the running heap length), so concatenate the cells serially after.
+    // Each descriptor's offset is the running heap length, so the cells are laid out
+    // serially after the parallel compress.
     let cells = map_tiles(ntiles, EncodeScratch::default, |s, t| -> Result<Vec<u8>> {
         geom.tile_into(t, &mut s.tile);
-        // Gather + widen this tile's pixels straight from the typed source — no
-        // whole-image `i64` buffer.
         convert::gather_i64(samples, &s.tile.row_bases, s.tile.row_len, &mut s.ints);
         let tile = Tile {
             shape: &s.tile.tdims,
@@ -385,8 +380,6 @@ impl<'a> QuantizedFloatImage<'a> {
             },
         };
         let width = zbitpix.integer_width();
-        // Quantize + compress each tile independently (the compute-bound step —
-        // parallel under the `parallel` feature); the heap is assembled serially after.
         let tiles = map_tiles(
             ntiles,
             EncodeScratch::default,
@@ -568,8 +561,8 @@ impl<'a> QuantizedFloatImage<'a> {
 
 /// Resolve the tile shape for an image: an empty `tile_shape` defaults to row-tiling
 /// (the first axis whole, the rest 1), or for `HCOMPRESS_1` to cfitsio's default (see
-/// [`hcompress_default_rows`]); a non-empty one is used as given (each axis clamped to
-/// ≥1) and must match the image rank, else [`FitsError::RankMismatch`]. An
+/// [`hcompress_default_rows`]); a non-empty one is used as given and must match the image
+/// rank, else [`FitsError::RankMismatch`], and have no zero side. An
 /// `HCOMPRESS_1` tiling with a side of its plane under 4 pixels, the last tile's
 /// included, is refused rather than adjusted; an axis of extent 1 lies outside the plane.
 fn resolve_tile_shape(
@@ -646,8 +639,7 @@ pub(super) const fn hcompress_default_rows(rows: usize) -> usize {
 }
 
 /// Append the `ZIMAGE`/`ZCMPTYPE`/`ZBITPIX`/`ZNAXIS` keywords plus the per-axis
-/// `ZNAXISn`/`ZTILEn` series — the block shared verbatim by both the integer and
-/// float `ZIMAGE` headers.
+/// `ZNAXISn`/`ZTILEn` series, shared by the integer and float `ZIMAGE` headers.
 fn set_zimage_axes(
     h: &mut Header,
     cmptype: &str,

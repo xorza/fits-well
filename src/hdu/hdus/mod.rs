@@ -176,14 +176,12 @@ impl<S: Source> Scan<'_, S> {
         Ok(Some(hdu))
     }
 
-    /// Read one header unit at the offset, advancing it past each consumed block,
-    /// until a block carries the `END` record. Each block is appended to the unit's bytes
-    /// through [`Source::read_append`], one copy from a stream, so the same scan drives
-    /// both seeking and in-memory sources.
+    /// Read one header unit at the offset, block by block, until one carries `END`. Blocks
+    /// come through [`Source::read_append`], one copy from a stream, so the same scan
+    /// drives seeking and in-memory sources.
     fn next_header(&mut self, position: HduPosition) -> Result<NextHeader> {
         let size = self.source.size();
-        // Most headers are a single block; reserve it so the common case parses with one
-        // allocation and only multi-block headers grow.
+        // Most headers are one block: one allocation for the common case.
         let mut bytes = Vec::with_capacity(BLOCK_SIZE);
         let mut sum = 0;
         loop {

@@ -17,8 +17,7 @@ fn accumulate_folds_end_around_carry() {
     assert_eq!(accumulate(&bytes, 0), 0x0000_0002);
     assert_eq!(accumulate(&[0, 0, 0, 1], 0), 1);
 
-    // Carry is folded after every word, so repeated maximal words never build
-    // an overflow-prone wider accumulator.
+    // Combining maximal words a million times stays at negative zero, never overflowing.
     let mut sum = 0;
     for _ in 0..1_000_000 {
         sum = combine(sum, u32::MAX);

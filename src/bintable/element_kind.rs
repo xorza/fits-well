@@ -100,10 +100,8 @@ impl ElementKind {
         }
     }
 
-    /// Whether a column's `scaling` realizes a FITS unsigned (or signed-byte)
-    /// convention over this element kind, and which one. This only maps the stored
-    /// type onto the matching `BITPIX` and hands `scaling` to
-    /// [`Scaling::unsigned_kind`], which resolves the convention for both paths.
+    /// Which FITS unsigned (or signed-byte) convention a column's `scaling` realizes over
+    /// this kind, if any: the matching `BITPIX` handed to [`Scaling::unsigned_kind`].
     pub(super) fn unsigned_kind(self, scaling: &Scaling) -> Option<UnsignedKind> {
         scaling.unsigned_kind(self.bitpix()?)
     }

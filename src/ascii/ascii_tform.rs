@@ -33,7 +33,7 @@ impl FromStr for AsciiTform {
     type Err = FitsError;
 
     /// The form `Aw`, `Iw`, `Fw.d`, `Ew.d` or `Dw.d` spells, blanks around it trimmed; a
-    /// float form's `.d` is 0 when absent, and a string or integer form's is not read.
+    /// float form's `.d` is 0 when absent, and a string or integer form's is parsed and dropped.
     /// Errors with [`FitsError::InvalidTform`] for any other text.
     fn from_str(value: &str) -> Result<Self> {
         let s = value.trim();

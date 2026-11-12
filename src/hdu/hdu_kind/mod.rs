@@ -79,9 +79,8 @@ impl HduKind {
         Ok(match xtension {
             "IMAGE" => Self::Image,
             "TABLE" => Self::AsciiTable,
-            // §10: a tiled-compressed image/table rides inside a BINTABLE,
-            // flagged by ZIMAGE/ZTABLE — classify by the payload, not the
-            // container, so callers see what they can actually read.
+            // §10: a tiled-compressed image/table rides inside a BINTABLE, flagged by
+            // ZIMAGE/ZTABLE; classified by its payload, which is what callers can read.
             "BINTABLE" if header.get_logical(keywords::ZIMAGE)? == Some(true) => {
                 Self::CompressedImage
             }
@@ -119,14 +118,12 @@ impl HduKind {
     }
 }
 
-/// Product of the axis lengths as the on-disk element count. Deliberately `u64`
-/// rather than the `usize` of [`crate::image_model::shape_product`]: this sizes a data unit
-/// on disk, which a 32-bit `usize` must not cap.
+/// Product of the axis lengths as the on-disk element count, a `u64` rather than the
+/// `usize` of [`crate::image_model::shape_product`] so a 32-bit `usize` does not cap a data
+/// unit.
 ///
-/// A zero-length axis always gives 0 (no data). `empty` is the count for an axis list
-/// with *no entries*, which differs by role — `NAXIS = 0` means an image has no data
-/// array at all (0), while a random group with no array axis still carries one array
-/// element per group (the empty product, 1).
+/// A zero-length axis gives 0. `empty` is the count for no axes: 0 for an image (`NAXIS = 0`
+/// has no data), 1 for a random group, which still carries one array element per group.
 fn axis_product(axes: &[usize], empty: u64) -> Result<u64> {
     if axes.contains(&0) {
         return Ok(0);

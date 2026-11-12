@@ -76,8 +76,8 @@ impl SpectralKind {
         if !value.is_finite() {
             return None;
         }
-        // ν₀ + ν₀·x in one rounding, not ν₀·(1 + x): next to the rest value 1 + x rounds
-        // to a multiple of 2⁻⁵², and the offset from ν₀ to whole ulps of 1.
+        // `mul_add` forms ν₀ + ν₀·x in one rounding; ν₀·(1 + x) would first round 1 + x to
+        // a multiple of 2⁻⁵², snapping the offset from ν₀ to whole ulps of 1.
         let result = match self {
             Self::Frequency | Self::Wavelength | Self::AirWavelength => nonzero(value)?,
             Self::Energy => nonzero(value)? / PLANCK_CONSTANT,

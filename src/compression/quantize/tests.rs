@@ -169,8 +169,8 @@ fn sample_seed_sums_every_sample_byte() {
     assert_eq!(sample_seed(FloatSamples::F32(&all_ones)), 1);
 }
 
-/// The estimator before it took an f32 image's differences in `f32` and selected medians
-/// on bit patterns, kept to cross-check it.
+/// A reference estimator that rounds each step in `f64` and selects medians by value, to
+/// cross-check the production one.
 fn reference_noise5(data: &[f64], width: usize, precision: Precision) -> Option<TileStatistics> {
     let mut nx = width.max(1);
     let mut ny = data.len() / nx;

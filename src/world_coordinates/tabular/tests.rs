@@ -154,9 +154,9 @@ fn run_search_matches_the_first_interval_scan() {
     }
 }
 
-/// The inverse passes over each cell whose corners cannot hold the point, so its
-/// budget of 2²² work units, 16 for each cell of a two-axis table, no longer runs out
-/// at 2¹⁸ = 262 144 cells: here a point in the last of 512 × 512.
+/// The inverse passes over each cell whose corners cannot hold the point, so its budget of
+/// 2²² work units, 16 for each cell of a two-axis table, does not run out at 2¹⁸ = 262 144
+/// cells: here a point in the last of 512 × 512.
 #[test]
 fn coupled_inverse_reaches_past_the_budget_of_every_cell() {
     const NODES: usize = 513;

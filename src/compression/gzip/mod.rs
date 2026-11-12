@@ -6,10 +6,8 @@ use crate::fits_error::Result;
 use crate::fits_error::SizeUnit;
 use flate2::{Compress, Compression, Crc, Decompress, FlushCompress, FlushDecompress, Status};
 
-/// Default deflate level used by [`crate::compress::Gzip::default`]. Level 1 favors write
-/// speed (gzip was the slowest compress path at the higher default); construct
-/// [`crate::compress::Gzip::new`] or [`crate::compress::Gzip::shuffled`] with a higher level for a
-/// tighter ratio.
+/// Default deflate level of [`crate::compress::Gzip`]: 1 favors write speed, as gzip was the
+/// slowest compress path at a higher default.
 pub(super) const DEFAULT_GZIP_LEVEL: u32 = 1;
 
 /// A gzip stream's parameters: the deflate `level` (0–9), which changes only the

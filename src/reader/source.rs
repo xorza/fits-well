@@ -43,14 +43,10 @@ pub trait Source: sealed::Sealed {
     /// itself (zero-copy); a streaming source reads into `scratch` and returns a
     /// slice of that. Errors if the range runs past the source.
     ///
-    /// The returned borrow is tied to `&mut self` (a streaming source genuinely seeks
-    /// and mutates), so a reader hands out one data unit at a time even for a fully
-    /// resident `SliceSource` — an image read borrows `&mut self`, and to hold several
-    /// images at once you read each into an owned `Image`. This uniform
-    /// single-path API is a deliberate tradeoff; if a caller ever needs *concurrent
-    /// zero-copy* views from a resident file, the fix is a separate resident-only
-    /// accessor that borrows with the source's own lifetime (not `&mut self`), added
-    /// then rather than designed for speculatively.
+    /// The borrow is tied to `&mut self` (a streaming source seeks), so a reader hands out
+    /// one data unit at a time even from a resident `SliceSource`; to hold several, read
+    /// each into an owned `Image`. Concurrent zero-copy views would need a separate
+    /// resident-only accessor, added when a caller needs it.
     fn slice<'a>(
         &'a mut self,
         offset: u64,
@@ -110,7 +106,6 @@ impl<R: Read + Seek> StreamSource<R> {
         self.inner
     }
 
-    /// Append the `len` bytes at `offset` to `out`, with no fill of its new capacity.
     /// Move to `offset`, which `check_range` bounded: by `seek_relative` from the known
     /// position, which a `BufReader` serves from its buffer when the hop lands in it, or
     /// from the start when the position is not known.
@@ -130,6 +125,7 @@ impl<R: Read + Seek> StreamSource<R> {
         Ok(())
     }
 
+    /// Append the `len` bytes at `offset` to `out`, with no fill of its new capacity.
     fn read_at(&mut self, offset: u64, len: usize, out: &mut Vec<u8>) -> Result<()> {
         check_range(offset, len, self.len)?;
         self.seek_to(offset)?;

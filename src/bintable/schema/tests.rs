@@ -35,11 +35,9 @@ fn row_width_mismatch_is_refused() {
 
 #[test]
 fn hostile_tform_repeat_saturates_to_a_width_mismatch() {
-    // A `TFORMn` repeat near usize::MAX makes `repeat × elem_size` overflow. The
-    // saturating `byte_width` clamps to usize::MAX rather than wrapping to a small
-    // value that could equal NAXIS1 and then slice out of bounds in `cell()`; the
-    // result is a clean row-width mismatch, not a panic. (`…9J` ≈ 1e19 < usize::MAX
-    // so it parses, then ×8 saturates.)
+    // `repeat × elem_size` overflows; the saturating `byte_width` clamps to usize::MAX
+    // rather than wrapping to a width that could equal NAXIS1 and slice out of bounds in
+    // `cell()`. (`…9J` ≈ 1e19 < usize::MAX parses, then ×8 saturates.)
     let header = table_header(8, 1, &["9999999999999999999J"]);
     assert_matches!(
         Table::from_data(&header, vec![0u8; 8]),

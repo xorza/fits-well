@@ -55,11 +55,9 @@ impl Scaling {
     /// The exact-integer realization this scaling denotes for samples stored as
     /// `bitpix`, or `None` when it is not a sign-bit-offset convention.
     ///
-    /// The single place the FITS unsigned convention is resolved. The offset test
-    /// itself lives in [`SampleType::from_scaling`]; what this adds is the null
-    /// guard — `BLANK` (or a table column's `TZEROn`-paired `TNULLn`, which maps
-    /// onto the same field) marks samples with no exact integer value, so an
-    /// unsigned view cannot represent them, and `SampleType` deliberately ignores it.
+    /// The offset test lives in [`SampleType::from_scaling`]; this adds the null guard:
+    /// `BLANK` (a table column's `TNULLn` maps onto it) marks samples with no exact integer
+    /// value, which an unsigned view cannot represent, and `SampleType` ignores it.
     pub(crate) fn unsigned_kind(&self, bitpix: Bitpix) -> Option<UnsignedKind> {
         if self.blank.is_some() {
             return None;
@@ -93,9 +91,8 @@ impl Scaling {
     /// Append the physical values of `samples` to `out`: `BZERO + BSCALE × sample`
     /// (§3.4, §5.2.5), the samples equal to an integer `BLANK` as `NaN`, and a float's
     /// `NaN` and infinities passed through. The affine is one fused multiply-add, the
-    /// correctly rounded `f64` of the exact value, where cfitsio rounds twice. The
-    /// `BLANK` test and the identity are decided once, outside the loop, which then
-    /// has no branch the data takes.
+    /// correctly rounded `f64` of the exact value, where cfitsio rounds twice. The `BLANK`
+    /// test and the identity are decided once, outside the loop.
     pub(crate) fn extend_physical<T: Sample, O: PhysicalSample>(
         &self,
         samples: &[T],

@@ -74,12 +74,8 @@ pub(super) fn validate_vla_extent(
     validate_extent(dims, element_count, keyword)
 }
 
-/// Both rules for a *caller-supplied* fixed-width `TDIMn`: the shape is well-formed
-/// and describes no more elements than the cell holds.
-///
-/// The read path applies only the extent rule, because a shape that came off a
-/// `TDIMn` card was already checked for well-formedness by [`parse`]; the writer's
-/// shape arrives straight from the caller and so needs both.
+/// Both rules for a caller-supplied fixed-width `TDIMn`. The read path applies only the
+/// extent rule, as [`parse`] already checked the shape's form.
 pub(crate) fn validate_declared(
     shape: Option<&[usize]>,
     element_count: usize,

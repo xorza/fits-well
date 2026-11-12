@@ -112,7 +112,7 @@ fn decodes_hand_built_ascii_rows() {
         table.column(1).unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(123), Some(-45)])
     );
-    // By-name access (case-insensitive) mirrors the by-index reads.
+    // By name, case-insensitive.
     assert_eq!(
         table.column("count").unwrap().raw().unwrap(),
         AsciiColumnData::Integer(vec![Some(123), Some(-45)])
@@ -136,9 +136,7 @@ fn decodes_hand_built_ascii_rows() {
         Err(FitsError::ColumnNotFound { name }) if name == "missing"
     );
 
-    // §7.2: the data unit is ASCII text, so a non-ASCII byte is rejected when the
-    // table is parsed rather than deferred until whichever column happens to hold it
-    // is read — here the corrupt byte sits in NAME while COUNT is well formed.
+    // §7.2: a non-ASCII byte fails the load, though it sits in NAME and COUNT is well formed.
     let mut corrupt = b"  AB   123def    -45".to_vec();
     corrupt[2] = 0xFF;
     assert_matches!(
@@ -368,9 +366,8 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
     exact(parse_ascii_float("3.14159-2", 5), 0.031_415_9);
     exact(parse_ascii_float("2.5+3", 1), 2500.0);
     exact(parse_ascii_float("-3.0-1", 1), -0.3);
-    // The leading mantissa sign is NOT an exponent; implicit decimal still applies.
+    // The leading mantissa sign is no exponent; the implied point still applies.
     exact(parse_ascii_float("-12", 3), -0.012);
-    // Explicit E/D forms keep working.
     exact(parse_ascii_float("1.5E2", 1), 150.0);
     exact(parse_ascii_float("1.5D-2", 1), 0.015);
     // A point-less mantissa takes its implied point with an exponent too, as cfitsio's
@@ -413,7 +410,6 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
             exponent: "2",
         })
     );
-    // The Fortran double `D`/`d` exponent splits in place (no String normalization).
     assert_eq!(
         split_mantissa_exponent("1.5D-2"),
         Some(Scientific {
@@ -426,7 +422,7 @@ fn signed_exponent_without_letter_parses_as_fortran_real() {
 
 #[test]
 fn reads_a_column_with_a_bare_sign_exponent_field() {
-    // The letter-less exponent form (CFITSIO emits it) must read, not error.
+    // cfitsio writes the letter-less exponent form.
     let header = ascii_table_header(12, 1, &[(1, "E12.5")]);
     let data = b"   3.14159-2".to_vec(); // 12 chars; 3.14159-2 = 0.0314159
     let table = Ascii::from_data(&header, data).unwrap();

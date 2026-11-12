@@ -5,8 +5,8 @@ use crate::image_model::scaling::Scaling;
 use crate::image_model::{I8_OFFSET, U16_OFFSET, U32_OFFSET, U64_OFFSET};
 
 /// Which exact-integer realization of the FITS sign-bit-offset conventions a stored
-/// type carries — effectively the tag of [`UnsignedData`], and the single thing both
-/// the image (`BZERO`) and binary-table (`TZEROn`) paths must resolve.
+/// type carries: the tag of [`UnsignedData`], resolved by both the image (`BZERO`) and
+/// binary-table (`TZEROn`) paths.
 ///
 /// [`UnsignedData`]: crate::image_model::unsigned_data::UnsignedData
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,14 +17,11 @@ pub(crate) enum UnsignedKind {
     U64,
 }
 
-/// The effective element type of an image's *physical* samples — the analogue of
-/// cfitsio's image "equivalent type". `BITPIX` records only the stored width and
-/// signedness; the FITS unsigned and signed-byte conventions then layer a `BZERO`
-/// offset on top (`BSCALE == 1` with `BZERO = 2^(n-1)`, or `BZERO = -128` for signed
-/// bytes), so the values actually mean an unsigned (or signed-byte) integer. This
-/// enum is what [`Borrowed::sample_type`] returns, resolved up front from `BITPIX` +
-/// [`Scaling`] without touching the pixels — so a caller can pick a code path (e.g. a
-/// per-type normalization range) without re-deriving the `BZERO` convention itself.
+/// The effective element type of an image's *physical* samples, as cfitsio's image
+/// "equivalent type". `BITPIX` records only the stored width and signedness; the FITS
+/// unsigned and signed-byte conventions layer a `BZERO` offset on top (`BSCALE == 1` with
+/// `BZERO = 2^(n-1)`, or `BZERO = -128` for signed bytes). [`Borrowed::sample_type`]
+/// returns it, resolved from `BITPIX` and [`Scaling`] without touching the pixels.
 ///
 /// [`Borrowed::sample_type`]: crate::image::Borrowed::sample_type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,11 +51,9 @@ pub enum SampleType {
 impl SampleType {
     /// Resolve the effective type from the stored `BITPIX` and its [`Scaling`].
     ///
-    /// A signed integer `BITPIX` whose scaling is exactly the unsigned (or signed-byte)
-    /// convention — `BSCALE == 1` and `BZERO` the matching sign-bit offset — resolves
-    /// to the corresponding unsigned (or `I8`) type; any other scaling leaves the
-    /// stored type as-is. `BLANK` does not affect the classification: it marks null
-    /// samples *within* a type, not the type itself.
+    /// `BSCALE == 1` with the matching sign-bit `BZERO` resolves to the unsigned (or `I8`)
+    /// type; any other scaling leaves the stored type. `BLANK` does not affect the result: it
+    /// marks null samples within a type.
     pub fn from_scaling(bitpix: Bitpix, scaling: Scaling) -> Self {
         let offset = scaling.bscale == 1.0;
         match bitpix {

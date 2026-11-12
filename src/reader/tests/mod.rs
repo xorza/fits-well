@@ -62,8 +62,8 @@ fn read_data_unit_is_stable_across_reads() {
     assert_eq!(a, b, "repeated raw reads yield identical data");
 }
 
-/// A whole read of a stream source lands in the image it returns and stages nothing:
-/// the staging buffer still holds the one header block the scan read, 2880 bytes.
+/// A whole read of a stream source lands in the image it returns and stages nothing: the
+/// staging buffer stays empty.
 #[test]
 fn whole_reads_stage_nothing() {
     let mut f = Fixture::Uit.stream();

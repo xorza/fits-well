@@ -22,8 +22,8 @@ use crate::world_coordinates::projection::Projection;
 use std::assert_matches;
 
 /// `header` with its distortion removed: plain TAN, no SIP keyword and no `PV`. Its round
-/// trip is the projection's own error, which the present TAN pipeline makes larger than
-/// a distortion's inverse.
+/// trip error is the projection's own, which the tests compare a distortion's inverse
+/// against.
 fn without_distortion(header: &Header) -> Wcs {
     let mut header = header.clone();
     header.remove_where(|name| {

@@ -78,8 +78,8 @@ impl<'a> Borrowed<'a> {
     /// Append the physical-plane values to `out`: `BZERO + BSCALE × sample` for every
     /// sample (§3.4), integer samples equal to `BLANK` as `NaN`, float `NaN`/`Inf`
     /// passed through. The arithmetic runs in `f64`, and an `f32` buffer narrows its
-    /// result, a second rounding. The unsigned-integer convention falls out for free — a
-    /// signed-16 buffer with `BZERO = 32768` gives the `u16` value.
+    /// result, a second rounding. A signed-16 buffer with `BZERO = 32768` gives the `u16`
+    /// value.
     pub fn physical_into<T: PhysicalSample>(&self, out: &mut Vec<T>) {
         self.samples.extend_physical(&self.scaling, out);
     }
@@ -201,10 +201,9 @@ impl<'a> View<'a> {
         }
     }
 
-    /// Append the samples to `out` in big-endian order — the inverse of a read's
-    /// decode. This is the unpadded data unit; the writer pads it to the
-    /// 2880-byte block grid. Appends (never clears), so a writer reusing one buffer
-    /// across HDUs clears it first and pays no per-image staging allocation.
+    /// Append the samples to `out` in big-endian order, the inverse of a read's decode: the
+    /// unpadded data unit, which the writer pads to the 2880-byte block grid. Never clears,
+    /// so a writer reusing one buffer across HDUs clears it first.
     pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
         match self {
             View::U8(v) => out.extend_from_slice(v),

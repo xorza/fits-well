@@ -57,10 +57,10 @@ impl ParsedRecord {
                 defect,
             })
         };
-        // FITS header records are restricted ASCII (§4.1). A name with another byte
-        // names nothing; elsewhere each such byte reads as `?`, so every fixed-column
-        // slice below lands on a char boundary, and its place decides whether it is a
-        // repaired comment or a malformed value.
+        // Records are restricted ASCII (§4.1). A name with another byte names nothing;
+        // elsewhere each such byte reads as `?`, so every fixed-column slice below lands on a
+        // char boundary, and its place decides whether it is a repaired comment or a
+        // malformed value.
         if !raw[..8].is_ascii() {
             return malformed(None, Defect::Name);
         }
@@ -264,8 +264,8 @@ fn render_one(record: &Record) -> Result<[u8; CARD_SIZE]> {
         Record::Malformed { .. } | Record::Hierarch { .. } => unreachable!("matched above"),
         Record::Valued { value, comment, .. } => {
             buf.bytes[8] = b'=';
-            // astropy and cfitsio both warn on a non-fixed-format mandatory
-            // keyword (§4.2.3–4.2.4).
+            // Fixed format right-justifies numbers and logicals to column 30; astropy and
+            // cfitsio warn on a mandatory keyword that is not (§4.2.3–4.2.4).
             let end = match value {
                 Value::Text(_) | Value::Undefined => buf.write_value_at(10, value)?,
                 _ => {
@@ -510,8 +510,7 @@ fn looks_real(token: &str) -> bool {
 /// Non-finite results (`inf`/`NaN`, which Rust's parser accepts and which an
 /// overflowing magnitude produces) are rejected — §4.2.4 has no such value form.
 fn parse_real(token: &str) -> Option<f64> {
-    // Only the Fortran `D`/`d` exponent needs rewriting; skip the allocation for
-    // the common `E`/`e`/plain decimal forms.
+    // Only the `D`/`d` exponent needs rewriting; the common forms skip the allocation.
     let parsed = if token.bytes().any(|b| b == b'd' || b == b'D') {
         token.replace(['d', 'D'], "E").parse::<f64>()
     } else {
@@ -906,12 +905,10 @@ fn escaped_len(text: &str) -> usize {
     text.len() + text.bytes().filter(|&byte| byte == b'\'').count()
 }
 
-/// A real that always reads back as [`Value::Real`], never a bare integer.
-/// `Display` never uses an exponent, so an extreme magnitude (`1e300`) would
-/// balloon to hundreds of digits and overflow the value field; the §4.2.4
-/// uppercase-`E` form takes over when the plain decimal passes 20 characters and
-/// the exponent form is shorter. A plain decimal shows a point exactly when the
-/// value has a fraction, so an integral one gains `.0`.
+/// A real that always reads back as [`Value::Real`], never a bare integer: an integral
+/// plain decimal gains `.0`. `Display` never uses an exponent, so an extreme magnitude
+/// (`1e300`) would overflow the value field; the §4.2.4 uppercase-`E` form takes over when
+/// the plain decimal passes 20 characters and the exponent form is shorter.
 fn write_real(out: &mut impl fmt::Write, real: f64) -> fmt::Result {
     debug_assert!(real.is_finite());
     let plain = counted_len(format_args!("{real}"));

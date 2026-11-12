@@ -9,10 +9,8 @@ use crate::endian;
 use crate::fits_error::Result;
 use crate::fits_error::{CompressedDataDefect, TileCell};
 
-/// Gather the tile rows starting at each of `row_bases` out of a typed sample plane
-/// into `out`, widening each element with `widen`. Axis 0 has stride 1, so a row is
-/// `row_len` contiguous elements and the gather is a run of slice copies rather than
-/// per-pixel indexing.
+/// Gathers the `row_len`-element rows at `row_bases` into `out`, widening each element with
+/// `widen`. Axis 0 has stride 1, so a row is contiguous.
 fn gather_rows<S: Copy, D>(
     values: &[S],
     row_bases: &[usize],
@@ -21,16 +19,14 @@ fn gather_rows<S: Copy, D>(
     widen: impl Fn(S) -> D,
 ) {
     out.clear();
-    // A tile is exactly this many elements, so ask for that and no more.
     out.reserve_exact(row_bases.len() * row_len);
     for &base in row_bases {
         out.extend(values[base..base + row_len].iter().map(|&x| widen(x)));
     }
 }
 
-/// Gather a tile's integer pixels straight from the typed source into `out`,
-/// widening to `i64` — so integer encoding never materializes a whole-image `i64`
-/// buffer.
+/// Gathers a tile's integer pixels from the typed source into `out`, widened to `i64`, so
+/// no whole-image `i64` buffer exists.
 pub(super) fn gather_i64(
     samples: IntSamples<'_>,
     row_bases: &[usize],
@@ -45,9 +41,8 @@ pub(super) fn gather_i64(
     }
 }
 
-/// Gather a tile's float pixels straight from the typed source into `out`,
-/// widening to `f64` — so float encoding never materializes a whole-image `f64`
-/// buffer.
+/// Gathers a tile's float pixels from the typed source into `out`, widened to `f64`, so
+/// no whole-image `f64` buffer exists.
 pub(super) fn gather_f64(
     samples: FloatSamples<'_>,
     row_bases: &[usize],
@@ -81,10 +76,8 @@ pub(super) fn gather_float_be(
     }
 }
 
-/// Narrow + pack `i64` values to big-endian `bitpix`-width integers in `out`, in a
-/// single pass (no intermediate narrowed `Vec`). `out` is cleared first, so it can
-/// be a reused scratch buffer. The narrowing rides along in `extend_be`'s
-/// vectorizable grow-once-then-fill-each-slot loop.
+/// Narrows `vals` to big-endian `bitpix`-width integers in `out` (cleared first), in one
+/// pass with no intermediate `Vec`.
 pub(super) fn i64_to_be_into(vals: &[i64], bitpix: IntBitpix, out: &mut Vec<u8>) {
     out.clear();
     match bitpix {
@@ -95,9 +88,8 @@ pub(super) fn i64_to_be_into(vals: &[i64], bitpix: IntBitpix, out: &mut Vec<u8>)
     }
 }
 
-/// Decode a big-endian buffer of `bitpix` integers into widened `i64` values in `out`
-/// (cleared first). Single pass — no intermediate narrowed `Vec`; the widening rides
-/// along in `decode_be_into`'s inlined, vectorizable per-chunk conversion.
+/// Decodes a big-endian buffer of `bitpix` integers into `i64` values in `out` (cleared
+/// first), in one pass with no intermediate `Vec`.
 pub(super) fn be_to_i64_into(bytes: &[u8], bitpix: IntBitpix, out: &mut Vec<i64>) {
     match bitpix {
         IntBitpix::U8 => endian::decode_be_into(bytes, out, |[b]| i64::from(b)),

@@ -158,9 +158,7 @@ impl AsciiSchema {
                 keyword: tbcol_keyword,
                 defect: KeywordDefect::Range,
             })?;
-            // §7.2.3: each field must lie within the row (`NAXIS1`). A column declared
-            // past the row width is malformed — reject it rather than let `field()`
-            // silently truncate to empty.
+            // §7.2.3: each field must lie within the row (`NAXIS1`).
             if start
                 .checked_add(tform.width())
                 .is_none_or(|end| end > row_len)
@@ -212,8 +210,8 @@ impl Ascii {
     /// The table `schema` describes, over its data unit `data`. Errors when the data
     /// ends before the rows do, and when the rows are not ASCII text.
     pub(crate) fn new(schema: AsciiSchema, data: Vec<u8>) -> Result<Self> {
-        // `row_count · row_len` from untrusted axes: check the product can't overflow
-        // (a 32-bit-usize hazard `HduKind::data_bytes`' u64 math wouldn't catch).
+        // Untrusted axes: the `usize` product can overflow on a 32-bit target, which
+        // `HduKind::data_bytes`' u64 math does not catch.
         let total = schema
             .row_count
             .checked_mul(schema.row_len)
@@ -221,11 +219,9 @@ impl Ascii {
         if data.len() < total {
             return Err(FitsError::UnexpectedEof);
         }
-        // §7.2: the data unit is ASCII text. Checking the whole field region once —
-        // as `Card::parse` does for a header record — means every later field read is
-        // a plain slice: no per-cell UTF-8 validation, and `TBCOLn` byte offsets are
-        // guaranteed to land on character boundaries. It also stops a corrupt byte in
-        // one column from being discovered only when that column happens to be read.
+        // §7.2: the data unit is ASCII text. Checked once here, every later field read is a
+        // plain slice at a character boundary, and a corrupt byte fails the load, not the
+        // read of whichever column holds it.
         let mut data = data;
         data.truncate(total);
         if !data.is_ascii() {
@@ -239,9 +235,8 @@ impl Ascii {
         })
     }
 
-    /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
-    /// through it — [`AsciiColumnReader::raw_into`]/[`physical_into`](AsciiColumnReader::physical_into) —
-    /// without re-passing the descriptor. Errors with
+    /// A reader handle for the column `column` selects, by index or `TTYPEn` name.
+    /// Errors with
     /// [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
     /// [`FitsError::ColumnNotFound`] for a name no column carries.
     pub fn column<'n>(
@@ -252,19 +247,17 @@ impl Ascii {
         Ok(AsciiColumnReader { table: self, index })
     }
 
-    /// The complete fixed-width text of column `col` in row `r`. Infallible: the field
-    /// region was validated as ASCII on parse, so every `TBCOLn` offset is a character
-    /// boundary. `from_data` rejected the non-ASCII bytes that could otherwise
-    /// masquerade as a blank field and silently decode to 0 in a numeric column.
+    /// The complete fixed-width text of column `col` in row `r`. Infallible: `new`
+    /// validated the field region as ASCII, so every `TBCOLn` offset is a character
+    /// boundary.
     fn field(&self, col: &AsciiColumn, r: usize) -> &str {
         let start = r * self.schema.row_len + col.byte_offset;
         &self.rows[start..start + col.tform.width()]
     }
 }
 
-/// A handle to one column of an [`Ascii`], from [`Ascii::column`]. Decode through it without re-passing the
-/// descriptor: [`raw_into`](Self::raw_into) for the typed values, [`physical_into`](Self::physical_into)
-/// for the scaled plane. Borrows the table, so it cannot outlive it.
+/// A handle to one column of an [`Ascii`], from [`Ascii::column`]: [`raw_into`](Self::raw_into)
+/// decodes the typed values, [`physical_into`](Self::physical_into) the scaled plane.
 #[derive(Debug, Clone, Copy)]
 pub struct AsciiColumnReader<'a> {
     table: &'a Ascii,
@@ -540,11 +533,9 @@ fn parse_literal(literal: fmt::Arguments<'_>) -> Option<f64> {
     fmt::format(literal).parse().ok()
 }
 
-/// Split a numeric string into mantissa and exponent text. The exponent is
-/// introduced by `E`/`e` or the Fortran double-precision `D`/`d` (§7.2.1), **or** by
-/// a bare `+`/`-` sign past the leading mantissa sign (the letter-less form, §7.2.5
-/// rule 3, e.g. `3.14159-2` = 3.14159 × 10⁻²). Matching `D`/`d` here means the parse
-/// never has to normalize the field into a fresh `String` first.
+/// Split a numeric string into mantissa and exponent text. The exponent is introduced by
+/// `E`/`e` or the Fortran `D`/`d` (§7.2.1), or by a bare `+`/`-` past the leading mantissa
+/// sign (the letter-less form, §7.2.5 rule 3: `3.14159-2` = 3.14159 × 10⁻²).
 fn split_mantissa_exponent(s: &str) -> Option<Scientific<'_>> {
     if let Some(i) = s.find(['E', 'e', 'D', 'd']) {
         return Some(Scientific {

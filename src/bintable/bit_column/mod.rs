@@ -15,12 +15,7 @@ use crate::bintable::tform::Storage;
 /// (rectangular, `row_count × repeat`) or
 /// [`ColumnReader::vla_bits`](crate::table::ColumnReader::vla_bits)
 /// (jagged `PX`/`QX`). Bits are MSB-first (§7.3.2) and viewed in place over the data
-/// unit (zero-copy), so this borrows the table and can't outlive it.
-///
-/// Index a row (`flags[row]` → a [`BitSlice`]), a bit by nesting (`flags[row][col]`)
-/// or by cell (`flags[(row, col)]`), reach for the checked [`get`](Self::get), or take
-/// a row with the source lifetime via [`row`](Self::row). Rows are full `bitvec`
-/// slices — `count_ones()`, `iter_ones()`, `.to_bitvec()` to own, etc.
+/// unit, so this borrows the table and can't outlive it. Rows are full `bitvec` slices.
 ///
 /// ```
 /// # fn read(table: &fits_well::table::Table, row: usize) -> fits_well::Result<()> {
@@ -53,9 +48,8 @@ impl<'a> BitColumn<'a> {
         self.table.extent.row_count == 0
     }
 
-    /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first — resolved on demand from
-    /// the data unit (no per-row storage). Index it (`row[c]`), iterate it, or
-    /// `.to_bitvec()` to own it. Panics if `r >= len()`.
+    /// Row `r`'s bits as a borrowed [`BitSlice`], MSB-first, with the source lifetime.
+    /// Panics if `r >= len()`.
     pub fn row(&self, r: usize) -> &'a BitSlice<u8, Msb0> {
         assert!(
             r < self.table.extent.row_count,
@@ -64,11 +58,9 @@ impl<'a> BitColumn<'a> {
         );
         let col = &self.table.columns[self.index];
         if col.tform.storage() == Storage::Fixed {
-            // Fixed `rX`: the row's cell, truncated to `repeat` bits.
             &self.table.cell(col, r).view_bits::<Msb0>()[..col.tform.repeat()]
         } else {
-            // Variable-length `PX`/`QX`: follow the descriptor into the heap. The span
-            // was bounds-checked by `vla_bits`, so the lookup can't fail here.
+            // The span was bounds-checked by `vla_bits`, so the lookup can't fail.
             let descriptor = self
                 .table
                 .pq_descriptor(col, r)
@@ -93,7 +85,7 @@ impl<'a> BitColumn<'a> {
         (col < bits.len()).then(|| bits[col])
     }
 
-    /// Iterate the rows, each a borrowed [`BitSlice`], resolved on demand.
+    /// The rows, each a borrowed [`BitSlice`].
     pub const fn iter(&self) -> BitRows<'a> {
         BitRows {
             column: *self,

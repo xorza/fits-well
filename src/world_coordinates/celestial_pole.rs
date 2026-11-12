@@ -7,8 +7,9 @@ use crate::world_coordinates::angle;
 use crate::world_coordinates::angle::R2D;
 use crate::world_coordinates::celestial_coordinate::CelestialCoordinate;
 
-/// The rotation from native to celestial coordinates: the celestial pole
-/// `(α_p, δ_p)` and the native longitude of the pole `φ_p` (LONPOLE), all degrees.
+/// The rotation from native to celestial coordinates: the celestial coordinates
+/// `(α_p, δ_p)` of the native pole and the native longitude `φ_p` of the celestial pole
+/// (LONPOLE), all degrees.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CelestialPole {
     /// Celestial longitude of the native pole, `α_p` (right ascension in an
@@ -30,7 +31,7 @@ pub(super) struct Fiducial {
 }
 
 impl CelestialPole {
-    /// Compute the celestial pole `(α_p, δ_p, φ_p)` from the fiducial point
+    /// Compute the pole `(α_p, δ_p, φ_p)` from the fiducial point
     /// `(φ₀, θ₀) → (α₀, δ₀)`, `φ_p` (LONPOLE), and `θ_p` (LATPOLE), as wcslib's `celset`
     /// does (CG 2002 §2.4). Zenithal (`θ₀ = 90°`) reduces to `(α₀, δ₀, φ_p)`.
     ///

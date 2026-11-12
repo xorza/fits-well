@@ -1,13 +1,10 @@
 //! Binary-table (`BINTABLE`) reading (§7.3).
 //!
-//! A binary table is `NAXIS2` rows of `NAXIS1` bytes; each of `TFIELDS` columns
-//! occupies a fixed byte range in every row, typed by its `TFORMn` code. That
-//! structure parses into a [`Schema`] of [`Column`] descriptors; decoding goes
-//! through a [`ColumnReader`] (from [`Table::column`]), whose methods yield typed [`ColumnData`]
+//! The header parses into a [`Schema`] of [`Column`] descriptors; decoding goes through a
+//! [`ColumnReader`] (from [`Table::column`]), whose methods yield typed [`ColumnData`]
 //! ([`ColumnReader::raw_into`]), the `TSCALn`/`TZEROn` physical plane
 //! ([`ColumnReader::physical_into`]), and `P`/`Q` variable-length arrays out of the heap
-//! ([`ColumnReader::vla_into`]), including their numeric, complex, and exact unsigned
-//! physical views.
+//! ([`ColumnReader::vla_into`]) with their numeric, complex, and exact unsigned views.
 //!
 //! [`Column`]: crate::bintable::column::Column
 //! [`ColumnData`]: crate::bintable::column_data::ColumnData
@@ -40,8 +37,7 @@ use crate::fits_error::Result;
 /// A binary table's structure plus its data unit.
 #[derive(Debug, Clone)]
 pub struct Table {
-    /// Everything the header alone determines — the same [`Schema`] that
-    /// [`Schema::parse`] produces, held rather than re-derived.
+    /// Everything the header alone determines.
     pub(crate) schema: Schema,
     /// The whole data unit (the `row_count * row_len` main table, then the heap and
     /// block fill). Fixed-width reads index the main-table prefix; `P`/`Q` columns
@@ -70,10 +66,8 @@ impl Table {
         &self.schema
     }
 
-    /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Decode
-    /// through it — [`ColumnReader`] exposes `raw`/`physical`/`unsigned`/`complex`/`bits`
-    /// and the `vla*` variants — without re-passing the column descriptor. Errors with
-    /// [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
+    /// A reader handle for the column `column` selects, by index or `TTYPEn` name. Errors
+    /// with [`FitsError::IndexOutOfBounds`] for an index past the last column, and with
     /// [`FitsError::ColumnNotFound`] for a name no column carries.
     ///
     /// [`FitsError::IndexOutOfBounds`]: crate::FitsError::IndexOutOfBounds
@@ -96,8 +90,7 @@ pub(crate) mod internals {
     use crate::internals::cards;
 
     impl Table {
-        /// Build a table from its header and owned data unit (`data` is the main
-        /// table followed by the optional heap, as returned by the reader).
+        /// Build a table from its header and owned data unit, as the reader returns it.
         pub(crate) fn from_data(header: &Header, data: Vec<u8>) -> Result<Self> {
             Self::new(Schema::parse(header)?, data)
         }

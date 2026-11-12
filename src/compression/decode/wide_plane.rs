@@ -24,9 +24,7 @@ pub(super) struct TileJob<'a> {
 
 /// The plane a tile decodes into: `i64` for an integer image, whose values fit the
 /// stored type afterwards, and the stored type itself for a float one. The two differ in
-/// how a tile is reconstructed and how its nulls are applied, so selecting the plane by
-/// type makes that split once, rather than re-testing `ZBITPIX.is_float()` at every
-/// dispatch site.
+/// how a tile is reconstructed and how its nulls are applied.
 pub(super) trait WidePlane: Copy + Send {
     /// Decode the tile of `job` into `scratch`, and say what a value outside the stored
     /// type's range means for it.

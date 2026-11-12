@@ -88,9 +88,8 @@ impl<'a> TableWcs<'a> {
                     .column_key("WCAX", column)
                     .expect("the rank was read under this keyword"),
             )?,
-            // Highest-first over the axes the cards could name, so the first hit is
-            // the rank. Probing a blind `(1..=99).rev()` instead costs ~800 header
-            // lookups per axis that turns out to be absent.
+            // Highest-first over the axes the cards could name: a blind `(1..=99).rev()`
+            // costs ~800 header lookups per absent axis.
             None => candidate_vector_axes(header)
                 .into_iter()
                 .find(|&axis| resolver.vector_axis_present(header, column, axis))
@@ -258,21 +257,15 @@ impl<'a> TableWcs<'a> {
     }
 }
 
-/// Every array axis a Table-22 vector keyword could name, gathered in one pass over
-/// the header and returned highest-first.
+/// Every array axis a Table-22 vector keyword could name, in one pass over the header,
+/// highest-first.
 ///
-/// Each vector family spells its array axis in the keyword's *leading digits* —
-/// `iCTYPn`, `iPVn_ma`, and for the matrix forms `ijPCna`/`ijCDna` a pair of them —
-/// so an axis that is genuinely present always appears as a contiguous digit
-/// substring of some card's leading run. Taking every such substring deliberately
-/// over-approximates: [`TableWcsResolver::vector_axis_present`] stays the exact
-/// test, and this only spares it the axes no card could possibly mention.
-///
-/// The alternative — parsing each family's grammar in reverse — has to disentangle
-/// `ijPCna` from `iCTYPn` and the abbreviated alternate roots from the primary ones
-/// they prefix, and a mistake there silently changes an image's rank. Over-
-/// approximating cannot: a spurious candidate is rejected, and a missed one is
-/// impossible by the substring argument above.
+/// Vector keywords spell their array axis in their leading digits (`iCTYPn`, `iPVn_ma`,
+/// `ijPCna`), so a present axis is always a digit substring of some card's leading run.
+/// Taking every substring over-approximates on purpose: [`TableWcsResolver::vector_axis_present`]
+/// stays the exact test. Parsing each family's grammar in reverse instead would have to
+/// disentangle `ijPCna` from `iCTYPn` and short alternate roots from the primary ones, and a
+/// mistake there silently changes an image's rank.
 fn candidate_vector_axes(header: &Header) -> Vec<usize> {
     let mut axes: Vec<usize> = Vec::new();
     for keyword in header.iter().filter_map(RecordView::keyword) {

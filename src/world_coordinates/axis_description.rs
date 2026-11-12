@@ -2,7 +2,7 @@
 
 use crate::world_coordinates::spectral_frame::SpectralFrame;
 
-/// Immutable source metadata for one WCS axis.
+/// Source metadata for one WCS axis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisDescription {
     /// The `CTYPEi` string.

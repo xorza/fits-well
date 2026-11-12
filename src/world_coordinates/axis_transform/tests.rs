@@ -25,16 +25,11 @@ fn sample(characteristic: Characteristic) -> f64 {
     }
 }
 
-/// [`convert`] and [`conversion_derivative`] are two parallel matches over the
-/// same twelve characteristic pairs. Nothing makes the compiler check that an
-/// arm of one agrees with its partner in the other, so a formula edited in one
-/// place and not the other is a silent numerical error — a spectral axis that
-/// still transforms, just wrongly, in one direction.
-///
-/// Differentiate `convert` numerically and hold `conversion_derivative` to it.
-/// A central difference is second-order accurate, so with a relative step of
-/// 1e-6 the two should agree far inside this tolerance; anything that disagrees
-/// at 1e-5 is a wrong formula, not roundoff.
+/// [`convert`] and [`conversion_derivative`] are two parallel matches over the same
+/// twelve characteristic pairs that the compiler does not hold to each other, so a
+/// formula edited in one alone is a silent numerical error. `conversion_derivative` is
+/// held to a numeric derivative of `convert`: a central difference at a relative step of
+/// 1e-6 agrees far inside 1e-5, so a disagreement there is a wrong formula, not roundoff.
 #[test]
 fn conversion_derivatives_match_the_conversions_they_describe() {
     let rest = ResolvedRest {
