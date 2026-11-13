@@ -21,7 +21,7 @@ FitsEditor
 
 FitsError
     #[non_exhaustive]
-    enum FitsError: Debug, Display, Error, From<CompressedDataDefect>, From<Error>, From<HcompressDefect>, From<Infallible>, From<PlioDefect>
+    enum FitsError: Debug, Display, Error, From<CompressedDataDefect>, From<Error>, From<HcompressDefect>, From<PlioDefect>, From<never>
         Io(Error)
         WriterFailed
         PrimaryAlreadyWritten
