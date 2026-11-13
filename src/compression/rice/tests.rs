@@ -345,7 +345,7 @@ fn decode_matches_the_reference_decode() {
         let stream = codec.encode(&values, &mut scratch).to_vec();
         let mut variants = vec![stream.clone()];
         variants.push(stream[..stream.len() * 2 / 3].to_vec());
-        let mut flipped = stream.clone();
+        let mut flipped = stream;
         let at = (rng.next() as usize) % flipped.len();
         flipped[at] ^= 1 << (rng.next() % 8);
         variants.push(flipped);

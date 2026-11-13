@@ -8,10 +8,12 @@ rustflags = ["-C", "target-cpu=x86-64-v3"]
 # The gate of AGENTS.md. Three feature sets: all features, `compression` without `parallel`, and no
 # codec at all. Each builds, and the tests pass in the first two. No `--workspace`: one crate.
 [alias]
-gate-lint = "clippy --all-targets --all-features --keep-going -- -D warnings"
-gate-lint-compression = "clippy --all-targets --no-default-features --features compression --keep-going -- -D warnings"
-gate-lint-bare = "clippy --all-targets --no-default-features --keep-going -- -D warnings"
-gate-ship = "clippy --keep-going -- -D warnings"
+# `build.warnings` denies cargo's own lints, as `unused_dependencies`, which clippy's `-D warnings`
+# leaves out.
+gate-lint = "clippy --all-targets --all-features --keep-going --config build.warnings=\"deny\" -- -D warnings"
+gate-lint-compression = "clippy --all-targets --no-default-features --features compression --keep-going --config build.warnings=\"deny\" -- -D warnings"
+gate-lint-bare = "clippy --all-targets --no-default-features --keep-going --config build.warnings=\"deny\" -- -D warnings"
+gate-ship = "clippy --keep-going --config build.warnings=\"deny\" -- -D warnings"
 gate-test = "test --tests --no-fail-fast --all-features"
 gate-test-compression = "test --tests --no-fail-fast --no-default-features --features compression"
 # `-D warnings` through a `cfg(all())` entry, as an env `RUSTDOCFLAGS` would replace the one Darkroom's

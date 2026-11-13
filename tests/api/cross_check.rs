@@ -11,10 +11,6 @@
 //! (`funpack -O unpacked.fits compressed_table.fits`) and compare it with `table.fits`.
 
 #![cfg(feature = "compression")]
-#![expect(
-    clippy::print_stdout,
-    reason = "the test reports where it wrote the files"
-)]
 
 use std::fs::{self, File};
 use std::path::Path;

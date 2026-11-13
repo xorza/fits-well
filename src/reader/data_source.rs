@@ -207,11 +207,7 @@ impl<S: Source> DataSource<S> {
                 && held.columns.as_deref() == read.columns
         });
         if !hit {
-            let buffer = self
-                .decoded
-                .take()
-                .map(|held| held.rows.data)
-                .unwrap_or_default();
+            let buffer = self.decoded.take().map_or_default(|held| held.rows.data);
             let rows = self.decode(read, buffer)?;
             self.decoded = Some(DecodedTiles {
                 hdu: read.hdu.index,

@@ -39,11 +39,9 @@ impl NativeRotation {
         let x = sin_theta * self.cos_dec - cos_theta * self.sin_dec * cos_dphi;
         let y = -cos_theta * sin_dphi;
         let z = sin_theta * self.sin_dec + cos_theta * self.cos_dec * cos_dphi;
-        // x and y are components of a unit vector, so √(x² + y²) cannot overflow and
-        // needs no `hypot`.
         CelestialCoordinate {
             ra: angle::norm360(self.pole.ra + y.libm_atan2(x) * R2D),
-            dec: z.libm_atan2(x.mul_add(x, y * y).sqrt()) * R2D,
+            dec: z.libm_atan2(x.libm_hypot(y)) * R2D,
         }
     }
 
@@ -69,7 +67,7 @@ impl NativeRotation {
         NativeCoordinate::from_sin_cos(
             angle::norm180(self.pole.lonpole + y.libm_atan2(x) * R2D),
             z,
-            x.mul_add(x, y * y).sqrt(),
+            x.libm_hypot(y),
         )
     }
 }
